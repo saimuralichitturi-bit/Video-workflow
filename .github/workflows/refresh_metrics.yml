@@ -108,7 +108,8 @@ jobs:
             --reel-ids-json /tmp/reel_ids_for_refresh.json \
             --out /tmp/refreshed_raw.json
         env:
-          INSTAGRAM_SESSION_ID: ${{ secrets.INSTA_SESSION }}
+          INSTA_USERNAME: ${{ secrets.INSTA_USERNAME }}
+          INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD }}
 
       # Step 4: Recompute all metrics
       - name: Recompute metrics

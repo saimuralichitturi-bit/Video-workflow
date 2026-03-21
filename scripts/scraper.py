@@ -18,6 +18,14 @@ from pathlib import Path
 
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
+import instagrapi.extractors as _extractors
+
+# Monkey-patch: Instagram removed pinned_channels_info but instagrapi still expects it
+_orig_broadcast = _extractors.extract_broadcast_channel
+def _safe_broadcast(data):
+    data.setdefault("pinned_channels_info", {"pinned_channels_list": []})
+    return _orig_broadcast(data)
+_extractors.extract_broadcast_channel = _safe_broadcast
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -34,22 +42,53 @@ def load_weights():
     with open(WEIGHTS_PATH) as f:
         return json.load(f)
 
+SESSION_FILE = Path("/tmp/instagram_session.json")
+
 def instagram_login() -> Client:
-    session_id = os.environ.get("INSTAGRAM_SESSION_ID")
-    if not session_id:
-        raise ValueError("INSTAGRAM_SESSION_ID env var not set")
+    username = os.environ.get("INSTA_USERNAME")
+    password = os.environ.get("INSTA_PASSWORD")
+    if not username or not password:
+        raise ValueError("INSTA_USERNAME and INSTA_PASSWORD env vars not set")
+
     cl = Client()
-    cl.login_by_sessionid(session_id)
-    log.info("Instagram login successful")
+    cl.delay_range = [1, 3]
+
+    # Reuse saved session to avoid re-login on every run
+    if SESSION_FILE.exists():
+        log.info("Loading saved session...")
+        cl.load_settings(SESSION_FILE)
+        cl.set_settings({"cookies": cl.get_settings().get("cookies", {})})
+        try:
+            cl.login(username, password)
+            cl.get_timeline_feed()
+            log.info("Session reused successfully")
+            return cl
+        except Exception:
+            log.warning("Saved session expired, logging in fresh...")
+            SESSION_FILE.unlink(missing_ok=True)
+            cl = Client()
+            cl.delay_range = [1, 3]
+
+    log.info(f"Logging in as {username}...")
+    cl.login(username, password)
+    cl.dump_settings(SESSION_FILE)
+    log.info("Login successful, session saved")
     return cl
 
 
 def fetch_account_reels(cl: Client, username: str, n: int) -> list:
     try:
         user = cl.user_info_by_username(username)
-        clips = cl.user_clips(user.pk, amount=n)
-        log.info(f"  {username}: fetched {len(clips)} reels")
-        return clips
+        # user_clips requires full login; user_medias works with session_id
+        medias = cl.user_medias(user.pk, amount=50)
+        # Filter reels only: media_type==2 (video) + product_type=="clips"
+        reels = [m for m in medias
+                 if m.media_type == 2 and getattr(m, "product_type", "") == "clips"]
+        if not reels:
+            # Fallback: take all videos if no clips found
+            reels = [m for m in medias if m.media_type == 2]
+        log.info(f"  {username}: fetched {len(reels)} reels")
+        return reels[:n]
     except ChallengeRequired:
         log.error(f"  {username}: challenge required — session needs refresh")
         return []

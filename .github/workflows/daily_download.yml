@@ -39,7 +39,8 @@ jobs:
       - name: Scrape Instagram reels
         run: python scripts/scraper.py --mode full --out /tmp/scraper_output.json
         env:
-          INSTAGRAM_SESSION_ID: ${{ secrets.INSTA_SESSION }}
+          INSTA_USERNAME: ${{ secrets.INSTA_USERNAME }}
+          INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD }}
 
       # Step 3: Compute all metrics + virality scores
       - name: Compute metrics
@@ -54,7 +55,8 @@ jobs:
             --out-dir /tmp/downloads \
             --out-manifest /tmp/download_manifest.json
         env:
-          INSTAGRAM_SESSION_ID: ${{ secrets.INSTA_SESSION }}
+          INSTA_USERNAME: ${{ secrets.INSTA_USERNAME }}
+          INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD }}
 
       # Step 5: Upload to Google Drive
       - name: Upload to Google Drive

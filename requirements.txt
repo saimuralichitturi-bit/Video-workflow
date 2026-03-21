@@ -1,0 +1,8 @@
+instagrapi==2.1.2
+yt-dlp
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+groq
+requests
+python-dateutil

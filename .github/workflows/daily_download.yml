@@ -1,0 +1,129 @@
+name: Daily Download
+
+on:
+  schedule:
+    - cron: "30 0 * * *"   # 6:00 AM IST = 00:30 UTC
+  workflow_dispatch:         # manual trigger
+
+jobs:
+  scrape-and-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Decode Drive service account key
+        run: |
+          echo "${{ secrets.GDRIVE_SERVICE_KEY }}" | base64 -d > /tmp/service_account.json
+        env:
+          GDRIVE_SERVICE_KEY: ${{ secrets.GDRIVE_SERVICE_KEY }}
+
+      # Step 1: List existing reel IDs in Drive (for dedup)
+      - name: List existing reel IDs from Drive
+        run: python scripts/drive_handler.py --mode list-ids --out-existing-ids /tmp/existing_reel_ids.json
+        env:
+          GDRIVE_KEY_PATH:        /tmp/service_account.json
+          GDRIVE_ROOT_FOLDER_ID:  ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+
+      # Step 2: Scrape reels from Instagram
+      - name: Scrape Instagram reels
+        run: python scripts/scraper.py --mode full --out /tmp/scraper_output.json
+        env:
+          INSTAGRAM_SESSION_ID: ${{ secrets.INSTAGRAM_SESSION_ID }}
+
+      # Step 3: Compute all metrics + virality scores
+      - name: Compute metrics
+        run: python scripts/metrics.py --in /tmp/scraper_output.json --out /tmp/metrics_output.json
+
+      # Step 4: Download top reels (skip existing)
+      - name: Download top reels
+        run: |
+          python scripts/downloader.py \
+            --metrics-json /tmp/metrics_output.json \
+            --existing-ids-json /tmp/existing_reel_ids.json \
+            --out-dir /tmp/downloads \
+            --out-manifest /tmp/download_manifest.json
+        env:
+          INSTAGRAM_SESSION_ID: ${{ secrets.INSTAGRAM_SESSION_ID }}
+
+      # Step 5: Upload to Google Drive
+      - name: Upload to Google Drive
+        run: python scripts/drive_handler.py --mode upload --manifest /tmp/download_manifest.json
+        env:
+          GDRIVE_KEY_PATH:       /tmp/service_account.json
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+
+      # Step 6: Generate clone strategies via Groq
+      - name: Generate clone strategies (Groq)
+        run: python scripts/groq_context.py --in /tmp/metrics_output.json --out /tmp/groq_output.json
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+      # Step 7: Select best reference video
+      - name: Select best reference video
+        run: python scripts/selector.py --in /tmp/groq_output.json --out-selection /tmp/selection_result.json
+
+      # Step 8: Copy best reel to top_reference/ and update selection_log
+      - name: Update top_reference in Drive
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+          sys.path.insert(0, "scripts")
+          import drive_handler as dh
+
+          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
+          service = dh.build_service()
+
+          with open("/tmp/selection_result.json") as f:
+              result = json.load(f)
+
+          best = result["best_meta"]
+          entry = result["selection_entry"]
+
+          # Copy files to top_reference/
+          dh.copy_to_top_reference(service, root_id, best)
+
+          # Append to selection_log.json
+          log_name = "selection_log.json"
+          state_folder = dh.get_or_create_folder(service, "state", root_id)
+          existing = dh.file_exists(service, log_name, state_folder)
+          existing_log = []
+          if existing:
+              import tempfile
+              with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+                  tf_path = tf.name
+              dh.download_file(service, existing, tf_path)
+              with open(tf_path) as f:
+                  existing_log = json.load(f)
+
+          existing_log.append(entry)
+          import tempfile
+          with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+              json.dump(existing_log, tf, indent=2)
+              tf_path = tf.name
+
+          if existing:
+              dh.update_file(service, existing, tf_path, "application/json")
+          else:
+              dh.upload_file(service, tf_path, log_name, state_folder, "application/json")
+
+          print(f"Updated selection_log.json with entry: {entry['reel_id']}")
+          EOF
+        env:
+          GDRIVE_KEY_PATH:       /tmp/service_account.json
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/downloads /tmp/service_account.json

@@ -1,0 +1,217 @@
+name: Refresh Metrics
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # every 6 hours
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Decode Drive service account key
+        run: echo "${{ secrets.GDRIVE_SERVICE_KEY }}" | base64 -d > /tmp/service_account.json
+
+      # Step 1: Download all existing JSON sidecars from Drive
+      - name: Download all JSON sidecars from Drive
+        run: |
+          python - <<'EOF'
+          import json, os, sys, tempfile
+          sys.path.insert(0, "scripts")
+          import drive_handler as dh
+
+          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
+          service = dh.build_service()
+
+          # List all json files under root
+          all_files = []
+          q = "name contains '.json' and trashed=false"
+          page_token = None
+          while True:
+              res = service.files().list(
+                  q=q,
+                  fields="nextPageToken, files(id, name, parents)",
+                  pageToken=page_token, pageSize=200
+              ).execute()
+              all_files.extend(res.get("files", []))
+              page_token = res.get("nextPageToken")
+              if not page_token:
+                  break
+
+          # Filter sidecar files (skip selection_log, last_run_state, current_best)
+          sidecars = [f for f in all_files
+                      if f["name"] not in ("selection_log.json", "last_run_state.json", "current_best.json")
+                      and "_" in f["name"]]
+
+          downloaded = []
+          os.makedirs("/tmp/json_sidecars", exist_ok=True)
+          for sf in sidecars:
+              out_path = f"/tmp/json_sidecars/{sf['name']}"
+              try:
+                  dh.download_file(service, sf["id"], out_path)
+                  with open(out_path) as f:
+                      meta = json.load(f)
+                  meta["_drive_file_id"] = sf["id"]
+                  downloaded.append(meta)
+              except Exception as e:
+                  print(f"Failed to download {sf['name']}: {e}")
+
+          with open("/tmp/existing_metadata.json", "w") as f:
+              json.dump(downloaded, f, indent=2)
+          print(f"Downloaded {len(downloaded)} JSON sidecars")
+          EOF
+        env:
+          GDRIVE_KEY_PATH:       /tmp/service_account.json
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+
+      # Step 2: Build reel_id list for refresh scrape
+      - name: Build reel ID list for re-scrape
+        run: |
+          python - <<'EOF'
+          import json
+          with open("/tmp/existing_metadata.json") as f:
+              metas = json.load(f)
+          reel_list = [
+              {
+                  "reel_id": m["identity"]["reel_id"],
+                  "account": m["identity"]["account"],
+                  "niche":   m["identity"]["niche"],
+                  "share_count": m["raw_metrics"].get("share_count", 0),
+                  "save_count":  m["raw_metrics"].get("save_count", 0),
+              }
+              for m in metas
+          ]
+          with open("/tmp/reel_ids_for_refresh.json", "w") as f:
+              json.dump(reel_list, f, indent=2)
+          print(f"Prepared {len(reel_list)} reels for refresh")
+          EOF
+
+      # Step 3: Re-scrape metrics from Instagram
+      - name: Re-scrape metrics
+        run: |
+          python scripts/scraper.py \
+            --mode refresh \
+            --reel-ids-json /tmp/reel_ids_for_refresh.json \
+            --out /tmp/refreshed_raw.json
+        env:
+          INSTAGRAM_SESSION_ID: ${{ secrets.INSTAGRAM_SESSION_ID }}
+
+      # Step 4: Recompute all metrics
+      - name: Recompute metrics
+        run: python scripts/metrics.py --in /tmp/refreshed_raw.json --out /tmp/refreshed_metrics.json
+
+      # Step 5: Merge refreshed metrics back into existing metadata
+      - name: Merge refreshed metrics into existing metadata
+        run: |
+          python - <<'EOF'
+          import json
+          from datetime import datetime, timezone
+
+          with open("/tmp/existing_metadata.json") as f:
+              existing = json.load(f)
+          with open("/tmp/refreshed_metrics.json") as f:
+              refreshed = json.load(f)
+
+          refreshed_map = {r["identity"]["reel_id"]: r for r in refreshed}
+          updated = []
+
+          for meta in existing:
+              rid = meta["identity"]["reel_id"]
+              if rid in refreshed_map:
+                  new = refreshed_map[rid]
+                  # Update only the fields that change
+                  meta["raw_metrics"]         = new["raw_metrics"]
+                  meta["computed_metrics"]    = new["computed_metrics"]
+                  meta["retention_proxy"]     = new["retention_proxy"]
+                  meta["virality"]            = new["virality"]
+                  meta["decision_summary"].update({
+                      k: new["decision_summary"][k]
+                      for k in [
+                          "virality_score", "tier", "retention_grade",
+                          "engagement_rate_pct", "total_views", "total_likes",
+                          "total_shares", "total_comments", "total_saves",
+                          "view_velocity", "hours_since_posted", "ready_for_cloning",
+                          "clone_priority"
+                      ]
+                      if k in new["decision_summary"]
+                  })
+                  meta["identity"]["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+              updated.append(meta)
+
+          with open("/tmp/updated_metadata.json", "w") as f:
+              json.dump(updated, f, indent=2)
+          print(f"Merged {len(updated)} metadata records")
+          EOF
+
+      # Step 6: Push updated JSONs back to Drive
+      - name: Upload updated JSON sidecars to Drive
+        run: |
+          python - <<'EOF'
+          import json, sys
+          sys.path.insert(0, "scripts")
+          import drive_handler as dh
+          import os
+
+          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
+          service = dh.build_service()
+
+          with open("/tmp/updated_metadata.json") as f:
+              updated = json.load(f)
+
+          for meta in updated:
+              file_id = meta.pop("_drive_file_id", None)
+              if not file_id:
+                  print(f"No file_id for {meta['identity']['reel_id']}, skipping")
+                  continue
+              try:
+                  dh.update_json_on_drive(service, file_id, meta)
+                  print(f"  Updated {meta['drive']['json_filename']}")
+              except Exception as e:
+                  print(f"  Failed to update {meta['identity']['reel_id']}: {e}")
+          EOF
+        env:
+          GDRIVE_KEY_PATH:       /tmp/service_account.json
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+
+      # Step 7: Re-evaluate best reference video
+      - name: Re-evaluate best reference video
+        run: python scripts/selector.py --in /tmp/updated_metadata.json --out-selection /tmp/refresh_selection.json
+
+      - name: Update top_reference if best changed
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+          sys.path.insert(0, "scripts")
+          import drive_handler as dh
+
+          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
+          service = dh.build_service()
+
+          with open("/tmp/refresh_selection.json") as f:
+              result = json.load(f)
+
+          best = result["best_meta"]
+          dh.copy_to_top_reference(service, root_id, best)
+          print(f"top_reference updated to {best['identity']['reel_id']}")
+          EOF
+        env:
+          GDRIVE_KEY_PATH:       /tmp/service_account.json
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/json_sidecars /tmp/service_account.json

@@ -1,0 +1,14 @@
+# Google credentials — never commit these
+client_secret*.json
+service_account*.json
+*-credentials.json
+*.keyfile.json
+myproject*.json
+
+# Runtime artifacts
+/tmp/
+__pycache__/
+*.pyc
+*.pyo
+.env
+session.txt

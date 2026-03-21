@@ -1,0 +1,22 @@
+{
+  "accounts": [
+    {
+      "username":        "zerodha",
+      "niche":           "finance",
+      "reels_to_scrape": 10,
+      "top_n_download":  5
+    },
+    {
+      "username":        "nikhilkamath",
+      "niche":           "finance",
+      "reels_to_scrape": 10,
+      "top_n_download":  5
+    },
+    {
+      "username":        "warikoo",
+      "niche":           "motivation",
+      "reels_to_scrape": 10,
+      "top_n_download":  5
+    }
+  ]
+}

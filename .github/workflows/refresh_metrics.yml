@@ -24,7 +24,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Decode Drive service account key
-        run: echo "${{ secrets.GDRIVE_SERVICE_KEY }}" | base64 -d > /tmp/service_account.json
+        run: echo "${{ secrets.DRIVE_SA_KEY }}" | base64 -d > /tmp/service_account.json
 
       # Step 1: Download all existing JSON sidecars from Drive
       - name: Download all JSON sidecars from Drive
@@ -37,7 +37,6 @@ jobs:
           root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
           service = dh.build_service()
 
-          # List all json files under root
           all_files = []
           q = "name contains '.json' and trashed=false"
           page_token = None
@@ -52,7 +51,6 @@ jobs:
               if not page_token:
                   break
 
-          # Filter sidecar files (skip selection_log, last_run_state, current_best)
           sidecars = [f for f in all_files
                       if f["name"] not in ("selection_log.json", "last_run_state.json", "current_best.json")
                       and "_" in f["name"]]
@@ -76,7 +74,7 @@ jobs:
           EOF
         env:
           GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
 
       # Step 2: Build reel_id list for refresh scrape
       - name: Build reel ID list for re-scrape
@@ -108,7 +106,7 @@ jobs:
             --reel-ids-json /tmp/reel_ids_for_refresh.json \
             --out /tmp/refreshed_raw.json
         env:
-          INSTAGRAM_SESSION_ID: ${{ secrets.INSTAGRAM_SESSION_ID }}
+          INSTAGRAM_SESSION_ID: ${{ secrets.INSTA_SESSION }}
 
       # Step 4: Recompute all metrics
       - name: Recompute metrics
@@ -133,7 +131,6 @@ jobs:
               rid = meta["identity"]["reel_id"]
               if rid in refreshed_map:
                   new = refreshed_map[rid]
-                  # Update only the fields that change
                   meta["raw_metrics"]         = new["raw_metrics"]
                   meta["computed_metrics"]    = new["computed_metrics"]
                   meta["retention_proxy"]     = new["retention_proxy"]
@@ -161,10 +158,9 @@ jobs:
       - name: Upload updated JSON sidecars to Drive
         run: |
           python - <<'EOF'
-          import json, sys
+          import json, sys, os
           sys.path.insert(0, "scripts")
           import drive_handler as dh
-          import os
 
           root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
           service = dh.build_service()
@@ -185,7 +181,7 @@ jobs:
           EOF
         env:
           GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
 
       # Step 7: Re-evaluate best reference video
       - name: Re-evaluate best reference video
@@ -210,7 +206,7 @@ jobs:
           EOF
         env:
           GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
 
       - name: Cleanup
         if: always()

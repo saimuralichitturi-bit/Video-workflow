@@ -113,7 +113,7 @@ jobs:
             --reel-ids-json /tmp/reel_ids_for_refresh.json \
             --out /tmp/refreshed_raw.json
         env:
-          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
+          IG_COOKIES_FILE: /tmp/ig_cookies.txt
 
       # Step 4: Recompute all metrics
       - name: Recompute metrics

@@ -1,7 +1,7 @@
 """
 scraper.py
-Scrape reels from public Instagram accounts using yt-dlp (no login required).
-Extracts metadata: views, likes, comments, caption, duration, timestamp.
+Scrape reels from public Instagram accounts using instaloader + cookies.
+No login required — uses exported browser cookies (Netscape format).
 
 Modes:
   --mode full     → scrape all accounts, return top_n reel data
@@ -13,9 +13,11 @@ import os
 import sys
 import argparse
 import logging
-import subprocess
+import http.cookiejar
 from datetime import datetime, timezone
 from pathlib import Path
+
+import instaloader
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -29,90 +31,60 @@ def load_config():
         return json.load(f)
 
 
-def get_cookie_args() -> list[str]:
-    """Return yt-dlp cookie arguments based on what's available."""
-    # GitHub Actions: cookies written to file from secret
-    cookie_file = os.environ.get("YTDLP_COOKIES_FILE")
-    if cookie_file and os.path.exists(cookie_file):
-        return ["--cookies", cookie_file]
-    # Local: extract from Chrome automatically
-    return ["--cookies-from-browser", "chrome"]
+def build_loader() -> instaloader.Instaloader:
+    L = instaloader.Instaloader(
+        quiet=True,
+        download_videos=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+    )
 
+    # Load cookies — file path from env or default location
+    cookies_file = (
+        os.environ.get("IG_COOKIES_FILE") or
+        os.environ.get("YTDLP_COOKIES_FILE")   # backwards compat
+    )
 
-def ytdlp_extract(url: str, max_items: int = 10) -> list[dict]:
-    """Run yt-dlp --dump-json on an Instagram profile or reel URL."""
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--dump-json",
-        "--no-download",
-        "--quiet",
-        "--no-warnings",
-        "--playlist-items", f"1:{max_items}",
-        *get_cookie_args(),
-        url
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        entries = []
-        for line in result.stdout.strip().splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return entries
-    except subprocess.TimeoutExpired:
-        log.error(f"  yt-dlp timed out for {url}")
-        return []
-    except Exception as e:
-        log.error(f"  yt-dlp failed for {url}: {e}")
-        return []
-
-
-def parse_entry(entry: dict, account_cfg: dict) -> dict:
-    """Convert yt-dlp JSON entry to our raw reel format."""
-    now = datetime.now(timezone.utc)
-
-    # Parse timestamp
-    ts = entry.get("timestamp") or entry.get("upload_date")
-    if isinstance(ts, int):
-        posted_at = datetime.fromtimestamp(ts, tz=timezone.utc)
-    elif isinstance(ts, str) and len(ts) == 8:
-        # YYYYMMDD format
-        posted_at = datetime.strptime(ts, "%Y%m%d").replace(tzinfo=timezone.utc)
+    if cookies_file and Path(cookies_file).exists():
+        log.info(f"Loading cookies from {cookies_file}")
+        jar = http.cookiejar.MozillaCookieJar()
+        jar.load(cookies_file, ignore_discard=True, ignore_expires=True)
+        L.context._session.cookies = jar
     else:
-        posted_at = now
+        log.warning("No cookies file found — scraping without auth (may hit rate limits)")
 
+    return L
+
+
+def parse_post(post, account_cfg: dict) -> dict:
+    now = datetime.now(timezone.utc)
+    posted_at = post.date_utc.replace(tzinfo=timezone.utc) if post.date_utc.tzinfo is None else post.date_utc
     hours_since = max(1.0, (now - posted_at).total_seconds() / 3600)
 
-    caption = entry.get("title") or entry.get("description") or ""
+    caption = post.caption or ""
     hashtags = [w for w in caption.split() if w.startswith("#")]
 
-    # reel_id = shortcode from URL or id field
-    reel_id = entry.get("id", "")
-    webpage_url = entry.get("webpage_url", "")
-    # Instagram shortcode is the last path segment
-    shortcode = webpage_url.rstrip("/").split("/")[-1] if webpage_url else reel_id
-
     return {
-        "reel_id":            shortcode or reel_id,
-        "pk":                 reel_id,
+        "reel_id":            post.shortcode,
+        "pk":                 str(post.mediaid),
         "account":            account_cfg["username"],
         "niche":              account_cfg["niche"],
-        "url":                webpage_url or f"instagram.com/p/{reel_id}",
+        "url":                f"https://www.instagram.com/p/{post.shortcode}/",
         "posted_at":          posted_at.isoformat(),
-        "duration_sec":       int(entry.get("duration") or 0),
+        "duration_sec":       int(post.video_duration or 0),
         "hours_since_posted": round(hours_since, 2),
-        "view_count":         int(entry.get("view_count") or 0),
-        "like_count":         int(entry.get("like_count") or 0),
-        "comment_count":      int(entry.get("comment_count") or 0),
+        "view_count":         post.video_view_count or 0,
+        "like_count":         post.likes or 0,
+        "comment_count":      post.comments or 0,
         "share_count":        0,
         "save_count":         0,
         "caption_full":       caption,
         "hashtags_all":       hashtags,
         "scraped_at":         now.isoformat(),
-        "_thumb_url":         entry.get("thumbnail", ""),
+        "_thumb_url":         post.url,
     }
 
 
@@ -136,66 +108,74 @@ def compute_engagement_rate(likes: int, comments: int, shares: int, views: int) 
     return {"pct": round(rate, 4), "label": label}
 
 
-def scrape_all_accounts(config: dict) -> list[dict]:
-    all_reels = []
-    for acc in config["accounts"]:
-        username = acc["username"]
-        n = acc["reels_to_scrape"]
-        url = f"https://www.instagram.com/{username}/"
-        log.info(f"Scraping {username} ({acc['niche']}) — {url}")
+def scrape_account(L: instaloader.Instaloader, account_cfg: dict) -> list[dict]:
+    username = account_cfg["username"]
+    n = account_cfg["reels_to_scrape"]
+    reels = []
 
-        entries = ytdlp_extract(url, max_items=n)
-        if not entries:
-            log.warning(f"  {username}: no entries returned")
-            continue
+    try:
+        profile = instaloader.Profile.from_username(L.context, username)
+        log.info(f"  {username}: {profile.followers} followers")
 
-        for e in entries:
-            raw = parse_entry(e, acc)
-            raw["view_velocity"]    = compute_view_velocity(raw["view_count"], raw["hours_since_posted"])
-            raw["engagement_rate"]  = compute_engagement_rate(
+        count = 0
+        for post in profile.get_posts():
+            if not post.is_video:
+                continue
+            raw = parse_post(post, account_cfg)
+            raw["view_velocity"]   = compute_view_velocity(raw["view_count"], raw["hours_since_posted"])
+            raw["engagement_rate"] = compute_engagement_rate(
                 raw["like_count"], raw["comment_count"],
                 raw["share_count"], raw["view_count"]
             )
-            all_reels.append(raw)
+            reels.append(raw)
+            count += 1
+            if count >= n:
+                break
 
-        log.info(f"  {username}: {len(entries)} reels scraped")
+        log.info(f"  {username}: scraped {len(reels)} reels")
+    except Exception as e:
+        log.error(f"  {username}: failed — {e}")
 
+    return reels
+
+
+def scrape_all_accounts(config: dict) -> list[dict]:
+    L = build_loader()
+    all_reels = []
+    for acc in config["accounts"]:
+        log.info(f"Scraping {acc['username']} ({acc['niche']})...")
+        all_reels.extend(scrape_account(L, acc))
     return all_reels
 
 
 def rescrape_metrics(reel_list: list[dict]) -> list[dict]:
-    """Refresh mode: re-scrape metrics for known reel shortcodes."""
+    """Refresh mode: re-scrape metrics for known shortcodes."""
+    L = build_loader()
     results = []
     now = datetime.now(timezone.utc)
+
     for entry in reel_list:
         code = entry.get("reel_id")
-        url  = f"https://www.instagram.com/p/{code}/"
         log.info(f"  Refreshing {code}...")
-        entries = ytdlp_extract(url, max_items=1)
-        if not entries:
-            log.warning(f"  {code}: could not refresh")
-            continue
-        e = entries[0]
-        posted_ts = e.get("timestamp")
-        if isinstance(posted_ts, int):
-            posted_at = datetime.fromtimestamp(posted_ts, tz=timezone.utc)
+        try:
+            post = instaloader.Post.from_shortcode(L.context, code)
+            posted_at = post.date_utc.replace(tzinfo=timezone.utc)
             hours_since = max(1.0, (now - posted_at).total_seconds() / 3600)
-        else:
-            hours_since = entry.get("hours_since_posted", 1)
-
-        results.append({
-            "reel_id":            code,
-            "account":            entry.get("account"),
-            "niche":              entry.get("niche"),
-            "view_count":         int(e.get("view_count") or 0),
-            "like_count":         int(e.get("like_count") or 0),
-            "comment_count":      int(e.get("comment_count") or 0),
-            "share_count":        entry.get("share_count", 0),
-            "save_count":         entry.get("save_count", 0),
-            "hours_since_posted": round(hours_since, 2),
-            "scraped_at":         now.isoformat(),
-        })
-        log.info(f"  {code}: {e.get('view_count', 0)} views")
+            results.append({
+                "reel_id":            code,
+                "account":            entry.get("account"),
+                "niche":              entry.get("niche"),
+                "view_count":         post.video_view_count or 0,
+                "like_count":         post.likes or 0,
+                "comment_count":      post.comments or 0,
+                "share_count":        entry.get("share_count", 0),
+                "save_count":         entry.get("save_count", 0),
+                "hours_since_posted": round(hours_since, 2),
+                "scraped_at":         now.isoformat(),
+            })
+            log.info(f"  {code}: {post.video_view_count} views")
+        except Exception as e:
+            log.error(f"  {code}: failed — {e}")
 
     return results
 
@@ -203,7 +183,7 @@ def rescrape_metrics(reel_list: list[dict]) -> list[dict]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["full", "refresh"], default="full")
-    parser.add_argument("--reel-ids-json", help="JSON with reel_id list (refresh mode)")
+    parser.add_argument("--reel-ids-json")
     parser.add_argument("--out", default="/tmp/scraper_output.json")
     args = parser.parse_args()
 

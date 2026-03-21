@@ -44,7 +44,7 @@ jobs:
       - name: Scrape Instagram reels
         run: python scripts/scraper.py --mode full --out /tmp/scraper_output.json
         env:
-          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
+          IG_COOKIES_FILE: /tmp/ig_cookies.txt
 
       # Step 3: Compute all metrics + virality scores
       - name: Compute metrics
@@ -59,7 +59,7 @@ jobs:
             --out-dir /tmp/downloads \
             --out-manifest /tmp/download_manifest.json
         env:
-          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
+          IG_COOKIES_FILE: /tmp/ig_cookies.txt
 
       # Step 5: Upload to Google Drive
       - name: Upload to Google Drive

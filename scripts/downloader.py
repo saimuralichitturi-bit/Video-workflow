@@ -60,12 +60,11 @@ def download_video(reel_url: str, out_path: str) -> bool:
         "no_warnings":      True,
         "merge_output_format": "mp4",
     }
-    session_id = os.environ.get("INSTAGRAM_SESSION_ID", "")
-    if session_id:
-        ydl_opts["cookiefile"] = None  # yt-dlp can use session cookies via extractor args
-        ydl_opts["extractor_args"] = {
-            "instagram": {"sessionid": session_id}
-        }
+    cookie_file = os.environ.get("YTDLP_COOKIES_FILE")
+    if cookie_file and os.path.exists(cookie_file):
+        ydl_opts["cookiefile"] = cookie_file
+    else:
+        ydl_opts["cookiesfrombrowser"] = ("chrome",)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

@@ -28,6 +28,11 @@ jobs:
           SA_KEY: ${{ secrets.DRIVE_SA_KEY }}
         run: printf '%s' "$SA_KEY" > /tmp/service_account.json
 
+      - name: Write Instagram cookies
+        env:
+          IG_COOKIES: ${{ secrets.IG_COOKIES }}
+        run: printf '%s' "$IG_COOKIES" > /tmp/ig_cookies.txt
+
       # Step 1: Download all existing JSON sidecars from Drive
       - name: Download all JSON sidecars from Drive
         run: |
@@ -108,8 +113,7 @@ jobs:
             --reel-ids-json /tmp/reel_ids_for_refresh.json \
             --out /tmp/refreshed_raw.json
         env:
-          INSTA_USERNAME: ${{ secrets.INSTA_USERNAME }}
-          INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD }}
+          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
 
       # Step 4: Recompute all metrics
       - name: Recompute metrics

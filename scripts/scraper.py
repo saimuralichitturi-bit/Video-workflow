@@ -1,11 +1,11 @@
 """
 scraper.py
-Fetch reels from target Instagram accounts, compute raw + virality scores,
-and return top_n reels per account.
+Scrape reels from public Instagram accounts using yt-dlp (no login required).
+Extracts metadata: views, likes, comments, caption, duration, timestamp.
 
 Modes:
-  --mode full     → scrape all accounts, return top_n reel data (used by daily_download.yml)
-  --mode refresh  → re-scrape metrics for existing reel_ids only (used by refresh_metrics.yml)
+  --mode full     → scrape all accounts, return top_n reel data
+  --mode refresh  → re-scrape metrics for existing reel_ids only
 """
 
 import json
@@ -13,24 +13,14 @@ import os
 import sys
 import argparse
 import logging
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-
-from instagrapi import Client
-from instagrapi.exceptions import LoginRequired, ChallengeRequired
-import instagrapi.extractors as _extractors
-
-# Monkey-patch: Instagram removed pinned_channels_info but instagrapi still expects it
-_orig_broadcast = _extractors.extract_broadcast_channel
-def _safe_broadcast(data):
-    data.setdefault("pinned_channels_info", {"pinned_channels_list": []})
-    return _orig_broadcast(data)
-_extractors.extract_broadcast_channel = _safe_broadcast
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "accounts.json"
+CONFIG_PATH  = Path(__file__).parent.parent / "config" / "accounts.json"
 WEIGHTS_PATH = Path(__file__).parent.parent / "config" / "scoring_weights.json"
 
 
@@ -38,109 +28,100 @@ def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
 
-def load_weights():
-    with open(WEIGHTS_PATH) as f:
-        return json.load(f)
 
-SESSION_FILE = Path("/tmp/instagram_session.json")
-
-def instagram_login() -> Client:
-    username = os.environ.get("INSTA_USERNAME")
-    password = os.environ.get("INSTA_PASSWORD")
-    if not username or not password:
-        raise ValueError("INSTA_USERNAME and INSTA_PASSWORD env vars not set")
-
-    cl = Client()
-    cl.delay_range = [1, 3]
-
-    # Reuse saved session to avoid re-login on every run
-    if SESSION_FILE.exists():
-        log.info("Loading saved session...")
-        cl.load_settings(SESSION_FILE)
-        cl.set_settings({"cookies": cl.get_settings().get("cookies", {})})
-        try:
-            cl.login(username, password)
-            cl.get_timeline_feed()
-            log.info("Session reused successfully")
-            return cl
-        except Exception:
-            log.warning("Saved session expired, logging in fresh...")
-            SESSION_FILE.unlink(missing_ok=True)
-            cl = Client()
-            cl.delay_range = [1, 3]
-
-    log.info(f"Logging in as {username}...")
-    cl.login(username, password)
-    cl.dump_settings(SESSION_FILE)
-    log.info("Login successful, session saved")
-    return cl
+def get_cookie_args() -> list[str]:
+    """Return yt-dlp cookie arguments based on what's available."""
+    # GitHub Actions: cookies written to file from secret
+    cookie_file = os.environ.get("YTDLP_COOKIES_FILE")
+    if cookie_file and os.path.exists(cookie_file):
+        return ["--cookies", cookie_file]
+    # Local: extract from Chrome automatically
+    return ["--cookies-from-browser", "chrome"]
 
 
-def fetch_account_reels(cl: Client, username: str, n: int) -> list:
+def ytdlp_extract(url: str, max_items: int = 10) -> list[dict]:
+    """Run yt-dlp --dump-json on an Instagram profile or reel URL."""
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--dump-json",
+        "--no-download",
+        "--quiet",
+        "--no-warnings",
+        "--playlist-items", f"1:{max_items}",
+        *get_cookie_args(),
+        url
+    ]
     try:
-        user = cl.user_info_by_username(username)
-        # user_clips requires full login; user_medias works with session_id
-        medias = cl.user_medias(user.pk, amount=50)
-        # Filter reels only: media_type==2 (video) + product_type=="clips"
-        reels = [m for m in medias
-                 if m.media_type == 2 and getattr(m, "product_type", "") == "clips"]
-        if not reels:
-            # Fallback: take all videos if no clips found
-            reels = [m for m in medias if m.media_type == 2]
-        log.info(f"  {username}: fetched {len(reels)} reels")
-        return reels[:n]
-    except ChallengeRequired:
-        log.error(f"  {username}: challenge required — session needs refresh")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        entries = []
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return entries
+    except subprocess.TimeoutExpired:
+        log.error(f"  yt-dlp timed out for {url}")
         return []
     except Exception as e:
-        log.error(f"  {username}: failed to fetch reels — {e}")
+        log.error(f"  yt-dlp failed for {url}: {e}")
         return []
 
 
-def build_raw_data(media, account_cfg: dict) -> dict:
+def parse_entry(entry: dict, account_cfg: dict) -> dict:
+    """Convert yt-dlp JSON entry to our raw reel format."""
     now = datetime.now(timezone.utc)
-    posted_at = media.taken_at.replace(tzinfo=timezone.utc) if media.taken_at.tzinfo is None else media.taken_at
+
+    # Parse timestamp
+    ts = entry.get("timestamp") or entry.get("upload_date")
+    if isinstance(ts, int):
+        posted_at = datetime.fromtimestamp(ts, tz=timezone.utc)
+    elif isinstance(ts, str) and len(ts) == 8:
+        # YYYYMMDD format
+        posted_at = datetime.strptime(ts, "%Y%m%d").replace(tzinfo=timezone.utc)
+    else:
+        posted_at = now
+
     hours_since = max(1.0, (now - posted_at).total_seconds() / 3600)
 
-    caption_text = ""
-    if media.caption_text:
-        caption_text = media.caption_text
-    elif hasattr(media, "caption") and media.caption:
-        caption_text = getattr(media.caption, "text", "")
+    caption = entry.get("title") or entry.get("description") or ""
+    hashtags = [w for w in caption.split() if w.startswith("#")]
 
-    # Extract hashtags from caption
-    hashtags = [w for w in caption_text.split() if w.startswith("#")]
+    # reel_id = shortcode from URL or id field
+    reel_id = entry.get("id", "")
+    webpage_url = entry.get("webpage_url", "")
+    # Instagram shortcode is the last path segment
+    shortcode = webpage_url.rstrip("/").split("/")[-1] if webpage_url else reel_id
 
     return {
-        "reel_id":          media.code,
-        "pk":               str(media.pk),
-        "account":          account_cfg["username"],
-        "niche":            account_cfg["niche"],
-        "url":              f"instagram.com/reel/{media.code}",
-        "posted_at":        posted_at.isoformat(),
-        "duration_sec":     int(media.video_duration or 0),
+        "reel_id":            shortcode or reel_id,
+        "pk":                 reel_id,
+        "account":            account_cfg["username"],
+        "niche":              account_cfg["niche"],
+        "url":                webpage_url or f"instagram.com/p/{reel_id}",
+        "posted_at":          posted_at.isoformat(),
+        "duration_sec":       int(entry.get("duration") or 0),
         "hours_since_posted": round(hours_since, 2),
-        "view_count":       media.view_count or 0,
-        "like_count":       media.like_count or 0,
-        "comment_count":    media.comment_count or 0,
-        "share_count":      0,  # not exposed by Instagram private API
-        "save_count":       0,  # not exposed by Instagram private API
-        "caption_full":     caption_text,
-        "hashtags_all":     hashtags,
-        "scraped_at":       now.isoformat(),
+        "view_count":         int(entry.get("view_count") or 0),
+        "like_count":         int(entry.get("like_count") or 0),
+        "comment_count":      int(entry.get("comment_count") or 0),
+        "share_count":        0,
+        "save_count":         0,
+        "caption_full":       caption,
+        "hashtags_all":       hashtags,
+        "scraped_at":         now.isoformat(),
+        "_thumb_url":         entry.get("thumbnail", ""),
     }
 
 
 def compute_view_velocity(view_count: int, hours: float) -> dict:
     velocity = view_count / hours
-    if velocity > 50000:
-        label = "explosive"
-    elif velocity > 10000:
-        label = "viral"
-    elif velocity > 1000:
-        label = "trending"
-    else:
-        label = "normal"
+    if velocity > 50000:   label = "explosive"
+    elif velocity > 10000: label = "viral"
+    elif velocity > 1000:  label = "trending"
+    else:                  label = "normal"
     return {"value": round(velocity, 2), "label": label}
 
 
@@ -148,92 +129,99 @@ def compute_engagement_rate(likes: int, comments: int, shares: int, views: int) 
     if views == 0:
         return {"pct": 0.0, "label": "low"}
     rate = ((likes + comments + shares) / views) * 100
-    if rate > 8:
-        label = "viral"
-    elif rate > 3:
-        label = "high"
-    elif rate > 1:
-        label = "average"
-    else:
-        label = "low"
+    if rate > 8:   label = "viral"
+    elif rate > 3: label = "high"
+    elif rate > 1: label = "average"
+    else:          label = "low"
     return {"pct": round(rate, 4), "label": label}
 
 
-def scrape_all_accounts(cl: Client, config: dict) -> list[dict]:
-    """Full mode: scrape all accounts, return raw reel data."""
+def scrape_all_accounts(config: dict) -> list[dict]:
     all_reels = []
     for acc in config["accounts"]:
-        log.info(f"Scraping {acc['username']} ({acc['niche']})...")
-        medias = fetch_account_reels(cl, acc["username"], acc["reels_to_scrape"])
-        for m in medias:
-            raw = build_raw_data(m, acc)
-            vel = compute_view_velocity(raw["view_count"], raw["hours_since_posted"])
-            eng = compute_engagement_rate(
+        username = acc["username"]
+        n = acc["reels_to_scrape"]
+        url = f"https://www.instagram.com/{username}/"
+        log.info(f"Scraping {username} ({acc['niche']}) — {url}")
+
+        entries = ytdlp_extract(url, max_items=n)
+        if not entries:
+            log.warning(f"  {username}: no entries returned")
+            continue
+
+        for e in entries:
+            raw = parse_entry(e, acc)
+            raw["view_velocity"]    = compute_view_velocity(raw["view_count"], raw["hours_since_posted"])
+            raw["engagement_rate"]  = compute_engagement_rate(
                 raw["like_count"], raw["comment_count"],
                 raw["share_count"], raw["view_count"]
             )
-            raw["view_velocity"] = vel
-            raw["engagement_rate"] = eng
             all_reels.append(raw)
+
+        log.info(f"  {username}: {len(entries)} reels scraped")
+
     return all_reels
 
 
-def rescrape_metrics(cl: Client, reel_ids: list[dict]) -> list[dict]:
-    """Refresh mode: re-scrape raw metrics for known reel_ids."""
+def rescrape_metrics(reel_list: list[dict]) -> list[dict]:
+    """Refresh mode: re-scrape metrics for known reel shortcodes."""
     results = []
     now = datetime.now(timezone.utc)
-    for entry in reel_ids:
+    for entry in reel_list:
         code = entry.get("reel_id")
-        try:
-            media = cl.media_info_by_url(f"https://www.instagram.com/reel/{code}/")
-            posted_at = media.taken_at.replace(tzinfo=timezone.utc) if media.taken_at.tzinfo is None else media.taken_at
+        url  = f"https://www.instagram.com/p/{code}/"
+        log.info(f"  Refreshing {code}...")
+        entries = ytdlp_extract(url, max_items=1)
+        if not entries:
+            log.warning(f"  {code}: could not refresh")
+            continue
+        e = entries[0]
+        posted_ts = e.get("timestamp")
+        if isinstance(posted_ts, int):
+            posted_at = datetime.fromtimestamp(posted_ts, tz=timezone.utc)
             hours_since = max(1.0, (now - posted_at).total_seconds() / 3600)
-            results.append({
-                "reel_id":       code,
-                "account":       entry.get("account"),
-                "niche":         entry.get("niche"),
-                "view_count":    media.view_count or 0,
-                "like_count":    media.like_count or 0,
-                "comment_count": media.comment_count or 0,
-                "share_count":   entry.get("share_count", 0),
-                "save_count":    entry.get("save_count", 0),
-                "hours_since_posted": round(hours_since, 2),
-                "scraped_at":    now.isoformat(),
-            })
-            log.info(f"  refreshed {code}: {media.view_count} views")
-        except Exception as e:
-            log.error(f"  failed to refresh {code}: {e}")
+        else:
+            hours_since = entry.get("hours_since_posted", 1)
+
+        results.append({
+            "reel_id":            code,
+            "account":            entry.get("account"),
+            "niche":              entry.get("niche"),
+            "view_count":         int(e.get("view_count") or 0),
+            "like_count":         int(e.get("like_count") or 0),
+            "comment_count":      int(e.get("comment_count") or 0),
+            "share_count":        entry.get("share_count", 0),
+            "save_count":         entry.get("save_count", 0),
+            "hours_since_posted": round(hours_since, 2),
+            "scraped_at":         now.isoformat(),
+        })
+        log.info(f"  {code}: {e.get('view_count', 0)} views")
+
     return results
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["full", "refresh"], default="full")
-    parser.add_argument("--reel-ids-json", help="Path to JSON with reel_id list (refresh mode)")
+    parser.add_argument("--reel-ids-json", help="JSON with reel_id list (refresh mode)")
     parser.add_argument("--out", default="/tmp/scraper_output.json")
     args = parser.parse_args()
 
     config = load_config()
 
-    try:
-        cl = instagram_login()
-    except Exception as e:
-        log.error(f"Login failed: {e}")
-        sys.exit(1)
-
     if args.mode == "full":
-        result = scrape_all_accounts(cl, config)
+        result = scrape_all_accounts(config)
     else:
         if not args.reel_ids_json or not os.path.exists(args.reel_ids_json):
             log.error("--reel-ids-json required for refresh mode")
             sys.exit(1)
         with open(args.reel_ids_json) as f:
-            reel_ids = json.load(f)
-        result = rescrape_metrics(cl, reel_ids)
+            reel_list = json.load(f)
+        result = rescrape_metrics(reel_list)
 
     with open(args.out, "w") as f:
         json.dump(result, f, indent=2)
-    log.info(f"Output written to {args.out} ({len(result)} reels)")
+    log.info(f"Output: {args.out} ({len(result)} reels)")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "accounts": [
     {
-      "username":        "zerodha",
+      "username":        "marketsbyzerodha",
       "niche":           "finance",
       "reels_to_scrape": 10,
       "top_n_download":  5

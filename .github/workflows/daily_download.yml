@@ -28,6 +28,11 @@ jobs:
           SA_KEY: ${{ secrets.DRIVE_SA_KEY }}
         run: printf '%s' "$SA_KEY" > /tmp/service_account.json
 
+      - name: Write Instagram cookies
+        env:
+          IG_COOKIES: ${{ secrets.IG_COOKIES }}
+        run: printf '%s' "$IG_COOKIES" > /tmp/ig_cookies.txt
+
       # Step 1: List existing reel IDs in Drive (for dedup)
       - name: List existing reel IDs from Drive
         run: python scripts/drive_handler.py --mode list-ids --out-existing-ids /tmp/existing_reel_ids.json
@@ -39,8 +44,7 @@ jobs:
       - name: Scrape Instagram reels
         run: python scripts/scraper.py --mode full --out /tmp/scraper_output.json
         env:
-          INSTA_USERNAME: ${{ secrets.INSTA_USERNAME }}
-          INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD }}
+          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
 
       # Step 3: Compute all metrics + virality scores
       - name: Compute metrics
@@ -55,8 +59,7 @@ jobs:
             --out-dir /tmp/downloads \
             --out-manifest /tmp/download_manifest.json
         env:
-          INSTA_USERNAME: ${{ secrets.INSTA_USERNAME }}
-          INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD }}
+          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
 
       # Step 5: Upload to Google Drive
       - name: Upload to Google Drive

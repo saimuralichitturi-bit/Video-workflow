@@ -7,14 +7,14 @@
       "top_n_download":  5
     },
     {
-      "username":        "nikhilkamath",
+      "username":        "wealth",
       "niche":           "finance",
       "reels_to_scrape": 10,
       "top_n_download":  5
     },
     {
-      "username":        "warikoo",
-      "niche":           "motivation",
+      "username":        "indianfinance.in",
+      "niche":           "finance",
       "reels_to_scrape": 10,
       "top_n_download":  5
     }

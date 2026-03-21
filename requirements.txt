@@ -1,4 +1,5 @@
 instagrapi==2.1.2
+Pillow>=8.1.1
 yt-dlp
 google-api-python-client
 google-auth-httplib2

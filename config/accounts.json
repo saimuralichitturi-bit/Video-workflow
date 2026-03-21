@@ -3,19 +3,19 @@
     {
       "username":        "marketsbyzerodha",
       "niche":           "finance",
-      "reels_to_scrape": 10,
+      "reels_to_scrape": 5,
       "top_n_download":  5
     },
     {
       "username":        "wealth",
       "niche":           "finance",
-      "reels_to_scrape": 10,
+      "reels_to_scrape": 5,
       "top_n_download":  5
     },
     {
       "username":        "indianfinance.in",
       "niche":           "finance",
-      "reels_to_scrape": 10,
+      "reels_to_scrape": 5,
       "top_n_download":  5
     }
   ]

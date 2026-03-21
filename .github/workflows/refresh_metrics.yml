@@ -23,8 +23,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Decode Drive service account key
-        run: echo "${{ secrets.DRIVE_SA_KEY }}" | base64 -d > /tmp/service_account.json
+      - name: Write Drive service account key
+        env:
+          SA_KEY: ${{ secrets.DRIVE_SA_KEY }}
+        run: printf '%s' "$SA_KEY" > /tmp/service_account.json
 
       # Step 1: Download all existing JSON sidecars from Drive
       - name: Download all JSON sidecars from Drive

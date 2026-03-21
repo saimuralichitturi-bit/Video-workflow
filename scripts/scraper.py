@@ -40,12 +40,14 @@ def build_loader() -> instaloader.Instaloader:
         download_comments=False,
         save_metadata=False,
         compress_json=False,
+        sleep=True,
+        max_connection_attempts=1,   # don't retry for 30 min — fail fast
+        request_timeout=60,
     )
 
-    # Load cookies — file path from env or default location
     cookies_file = (
         os.environ.get("IG_COOKIES_FILE") or
-        os.environ.get("YTDLP_COOKIES_FILE")   # backwards compat
+        os.environ.get("YTDLP_COOKIES_FILE")
     )
 
     if cookies_file and Path(cookies_file).exists():
@@ -133,6 +135,11 @@ def scrape_account(L: instaloader.Instaloader, account_cfg: dict) -> list[dict]:
                 break
 
         log.info(f"  {username}: scraped {len(reels)} reels")
+    except instaloader.exceptions.ConnectionException as e:
+        if "429" in str(e) or "Too Many Requests" in str(e):
+            log.warning(f"  {username}: rate limited (429) — skipping, will retry next run")
+        else:
+            log.error(f"  {username}: connection error — {e}")
     except Exception as e:
         log.error(f"  {username}: failed — {e}")
 
@@ -140,9 +147,12 @@ def scrape_account(L: instaloader.Instaloader, account_cfg: dict) -> list[dict]:
 
 
 def scrape_all_accounts(config: dict) -> list[dict]:
+    import time
     L = build_loader()
     all_reels = []
-    for acc in config["accounts"]:
+    for i, acc in enumerate(config["accounts"]):
+        if i > 0:
+            time.sleep(8)   # pause between accounts to avoid rate limits
         log.info(f"Scraping {acc['username']} ({acc['niche']})...")
         all_reels.extend(scrape_account(L, acc))
     return all_reels

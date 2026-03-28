@@ -67,6 +67,16 @@ def build_loader() -> instaloader.Instaloader:
         log.info(f"Using proxy: {proxy}")
         L.context._session.proxies = {"http": proxy, "https": proxy}
 
+    # Headers required by Instagram's GraphQL endpoint
+    L.context._session.headers.update({
+        "X-IG-App-ID":        "936619743392459",
+        "X-ASBD-ID":          "198387",
+        "X-IG-WWW-Claim":     "0",
+        "X-Requested-With":   "XMLHttpRequest",
+        "Sec-Fetch-Site":     "same-origin",
+        "Referer":            "https://www.instagram.com/",
+    })
+
     return L
 
 

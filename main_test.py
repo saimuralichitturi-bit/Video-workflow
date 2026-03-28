@@ -34,6 +34,50 @@ def get_driver():
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
+def handle_challenge(driver):
+    """Detect and resolve Instagram challenge (email/SMS code)."""
+    current_url = driver.current_url
+    page_source = driver.page_source
+
+    is_challenge = (
+        "/challenge/" in current_url
+        or "checkpoint" in current_url
+        or "We detected an unusual login attempt" in page_source
+        or "Enter the code" in page_source
+        or "Verify your account" in page_source
+        or "verify" in current_url.lower()
+    )
+
+    if not is_challenge:
+        return False
+
+    screenshot_path = "/tmp/ig_challenge.png"
+    driver.save_screenshot(screenshot_path)
+    print(f"\n⚠️  Instagram challenge detected!")
+    print(f"📸 Screenshot saved: {screenshot_path}")
+    print(f"   View it with:  scp ubuntu@<your_vm_ip>:{screenshot_path} .")
+    print(f"   Current URL:   {current_url}\n")
+    print("Check your email/SMS for a verification code.")
+
+    code = input("Enter the 6-digit verification code: ").strip()
+
+    # Try to find and fill the code input
+    try:
+        code_input = driver.find_element(By.CSS_SELECTOR, "input[name='verificationCode'], input[aria-label*='ode'], input[type='text']")
+        code_input.clear()
+        code_input.send_keys(code)
+        sleep(1)
+        submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+        submit_btn.click()
+        sleep(3)
+        print("✅ Challenge code submitted")
+        return True
+    except Exception as e:
+        print(f"❌ Could not auto-submit code: {e}")
+        print("Try submitting manually if you have a display.")
+        return False
+
+
 def inject_session(driver, username):
     driver.get(f"https://www.instagram.com/{username}/")
     sleep(2)
@@ -44,6 +88,10 @@ def inject_session(driver, username):
     })
     driver.refresh()
     sleep(3)
+
+    if handle_challenge(driver):
+        sleep(2)
+
     print(f"✅ Session injected for @{username}")
 
 def scroll_and_collect(driver, callback, max_scrolls=10):

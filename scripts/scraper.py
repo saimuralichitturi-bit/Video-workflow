@@ -58,6 +58,15 @@ def build_loader() -> instaloader.Instaloader:
     else:
         log.warning("No cookies file found — scraping without auth (may hit rate limits)")
 
+    proxy = (
+        os.environ.get("ALL_PROXY") or
+        os.environ.get("HTTPS_PROXY") or
+        os.environ.get("HTTP_PROXY")
+    )
+    if proxy:
+        log.info(f"Using proxy: {proxy}")
+        L.context._session.proxies = {"http": proxy, "https": proxy}
+
     return L
 
 

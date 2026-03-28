@@ -1,81 +1,53 @@
+"""
+main_test.py
+Scrape top 5 reels per account using Selenium + session cookie.
+Runs locally — no VM, no GitHub Actions needed.
+
+Usage:
+    python main_test.py
+
+Set your Instagram sessionid in IG_SESSION_ID env var or hardcode below.
+"""
+
+import os
+import json
+import re
+from time import sleep
+from datetime import datetime
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from time import sleep
-import json
-import re
 
-import os
-SESSION_ID = os.environ.get("IG_SESSION_ID", "")
-TARGET_USERNAME = os.environ.get("IG_TARGET_USERNAME", "finance.and.stockmarkets")
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+SESSION_ID = os.environ.get("IG_SESSION_ID", "")   # or paste your sessionid here
+
+ACCOUNTS = [
+    "marketsbyzerodha",
+    "wealth",
+    "indianfinance.in",
+]
+
+TOP_N = 5          # top reels to keep per account
+MAX_SCROLLS = 8    # how far to scroll on reels page to collect links
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def get_driver():
     options = Options()
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-popup-blocking")
-    options.add_argument("--disable-infobars")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--headless=new")
-    options.add_argument("--remote-debugging-port=9222")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    return driver
-
-def handle_challenge(driver):
-    """Detect and resolve Instagram challenge (email/SMS code)."""
-    current_url = driver.current_url
-    page_source = driver.page_source
-
-    is_challenge = (
-        "/challenge/" in current_url
-        or "checkpoint" in current_url
-        or "We detected an unusual login attempt" in page_source
-        or "Enter the code" in page_source
-        or "Verify your account" in page_source
-        or "verify" in current_url.lower()
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=options
     )
-
-    if not is_challenge:
-        return False
-
-    screenshot_path = "/tmp/ig_challenge.png"
-    driver.save_screenshot(screenshot_path)
-    print(f"\n⚠️  Instagram challenge detected!")
-    print(f"📸 Screenshot saved: {screenshot_path}")
-    print(f"   View it with:  scp ubuntu@<your_vm_ip>:{screenshot_path} .")
-    print(f"   Current URL:   {current_url}\n")
-    print("Check your email/SMS for a verification code.")
-
-    code = input("Enter the 6-digit verification code: ").strip()
-
-    # Try to find and fill the code input
-    try:
-        code_input = driver.find_element(By.CSS_SELECTOR, "input[name='verificationCode'], input[aria-label*='ode'], input[type='text']")
-        code_input.clear()
-        code_input.send_keys(code)
-        sleep(1)
-        submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        submit_btn.click()
-        sleep(3)
-        print("✅ Challenge code submitted")
-        return True
-    except Exception as e:
-        print(f"❌ Could not auto-submit code: {e}")
-        print("Try submitting manually if you have a display.")
-        return False
+    driver.set_window_size(1280, 900)
+    return driver
 
 
 def inject_session(driver, username):
@@ -89,148 +61,122 @@ def inject_session(driver, username):
     driver.refresh()
     sleep(3)
 
-    if handle_challenge(driver):
-        sleep(2)
 
-    print(f"✅ Session injected for @{username}")
+def collect_reel_links(driver, username, max_scrolls=MAX_SCROLLS):
+    driver.get(f"https://www.instagram.com/{username}/reels/")
+    sleep(4)
 
-def scroll_and_collect(driver, callback, max_scrolls=10):
+    links = []
     last_height = driver.execute_script("return document.body.scrollHeight")
-    no_change_count = 0
-    scrolls = 0
+    no_change = 0
 
-    while scrolls < max_scrolls and no_change_count < 3:
+    for scroll in range(max_scrolls):
+        for a in driver.find_elements(By.TAG_NAME, "a"):
+            href = a.get_attribute("href")
+            if href and "/reel/" in href and href not in links:
+                links.append(href)
+
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         sleep(3)
-        callback(driver)
+
         new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            no_change_count += 1
-        else:
-            no_change_count = 0
+        no_change = 0 if new_height != last_height else no_change + 1
         last_height = new_height
-        scrolls += 1
-        print(f"   📜 Scroll {scrolls}/{max_scrolls}")
 
-def extract_text_safe(driver, selectors):
-    """Try multiple selectors, return first match"""
-    for selector in selectors:
-        try:
-            el = driver.find_element(By.CSS_SELECTOR, selector)
-            text = el.text.strip()
-            if text:
-                return text
-        except:
-            continue
-    return "N/A"
+        print(f"  scroll {scroll+1}/{max_scrolls} — {len(links)} links found")
+        if no_change >= 3:
+            break
 
-def extract_reel_data(driver, reel_url):
+    return links
+
+
+def extract_reel_data(driver, reel_url, account):
     driver.get(reel_url)
     sleep(3)
 
     shortcode = reel_url.rstrip("/").split("/")[-1]
-
-    # Caption — try multiple selectors
-    caption = extract_text_safe(driver, [
-        "h1._ap3a",
-        "h1",
-        "div._a9zs span",
-        "div[class*='caption'] span",
-        "span._ap3a._aaco._aacu._aacx._aad7._aade",
-        "div.C4VMK span",
-    ])
-
-    # Likes — try multiple selectors
-    likes = extract_text_safe(driver, [
-        "span.x193iq5w[dir='auto']",
-        "div._aacl._aaco._aacw._aacx._aad7 span",
-        "section span span",
-        "div[class*='like'] span",
-        "button[type='button'] span span",
-    ])
-
-    # Comments count
-    comments = extract_text_safe(driver, [
-        "div._ae2s._ae3v._ae3w span",
-        "ul._a9ym li span",
-        "span[aria-label*='comment']",
-    ])
-
-    # Try getting page source for likes/views via regex
     page_source = driver.page_source
-    
-    # Extract likes from page source
-    likes_match = re.search(r'"like_count":(\d+)', page_source)
-    if likes_match:
-        likes = likes_match.group(1)
 
-    # Extract view count
-    views_match = re.search(r'"play_count":(\d+)', page_source)
-    views = views_match.group(1) if views_match else "N/A"
-
-    # Extract comment count
+    likes_match   = re.search(r'"like_count":(\d+)', page_source)
+    views_match   = re.search(r'"play_count":(\d+)', page_source)
     comments_match = re.search(r'"comment_count":(\d+)', page_source)
-    comments = comments_match.group(1) if comments_match else "N/A"
+    caption_match = re.search(r'"caption":\{"text":"(.*?)"', page_source)
 
-    # Extract caption from page source if not found
-    if caption == "N/A":
-        caption_match = re.search(r'"caption":\{"text":"(.*?)"', page_source)
-        if caption_match:
-            caption = caption_match.group(1)
+    likes    = int(likes_match.group(1))    if likes_match    else 0
+    views    = int(views_match.group(1))    if views_match    else 0
+    comments = int(comments_match.group(1)) if comments_match else 0
+    caption  = caption_match.group(1)       if caption_match  else ""
 
-    hashtags = re.findall(r"#\w+", caption) if caption != "N/A" else []
-    mentions = re.findall(r"@\w+", caption) if caption != "N/A" else []
+    hashtags = re.findall(r"#\w+", caption)
 
     return {
-        "shortcode": shortcode,
-        "url": reel_url,
-        "likes": likes,
-        "views": views,
-        "comments": comments,
-        "caption": caption,
-        "hashtags": hashtags,
-        "mentions": mentions,
+        "shortcode":  shortcode,
+        "account":    account,
+        "url":        reel_url,
+        "views":      views,
+        "likes":      likes,
+        "comments":   comments,
+        "caption":    caption,
+        "hashtags":   hashtags,
+        "scraped_at": datetime.utcnow().isoformat(),
     }
 
-def scrape_reels(username):
+
+def scrape_account(driver, username):
+    print(f"\n{'='*50}")
+    print(f"Scraping @{username}...")
+
+    inject_session(driver, username)
+    links = collect_reel_links(driver, username)
+    print(f"  Found {len(links)} reel links")
+
+    reels = []
+    for i, url in enumerate(links[:20]):   # visit up to 20, pick top 5 after
+        try:
+            data = extract_reel_data(driver, url, username)
+            reels.append(data)
+            print(f"  [{i+1}] views:{data['views']:,}  likes:{data['likes']:,}  {url}")
+        except Exception as e:
+            print(f"  [{i+1}] failed: {e}")
+        sleep(2)
+
+    top = sorted(reels, key=lambda r: r["views"], reverse=True)[:TOP_N]
+    print(f"  Top {TOP_N} by views:")
+    for r in top:
+        print(f"    {r['shortcode']} — {r['views']:,} views, {r['likes']:,} likes")
+
+    return top
+
+
+def main():
+    if not SESSION_ID:
+        print("ERROR: IG_SESSION_ID not set.")
+        print("Get it from Chrome → F12 → Application → Cookies → instagram.com → sessionid")
+        return
+
     driver = get_driver()
-    reels_data = []
-    reel_links = []
+    all_results = {}
 
     try:
-        inject_session(driver, username)
-
-        driver.get(f"https://www.instagram.com/{username}/reels/")
-        sleep(4)
-        print(f"🔍 Scraping reels for @{username}...")
-
-        def collect_reel_links(driver):
-            anchors = driver.find_elements(By.TAG_NAME, "a")
-            for a in anchors:
-                href = a.get_attribute("href")
-                if href and "/reel/" in href and href not in reel_links:
-                    reel_links.append(href)
-
-        scroll_and_collect(driver, collect_reel_links, max_scrolls=8)
-        print(f"✅ Found {len(reel_links)} reel links\n")
-
-        for i, reel_url in enumerate(reel_links[:20]):
+        for account in ACCOUNTS:
             try:
-                data = extract_reel_data(driver, reel_url)
-                reels_data.append(data)
-                print(f"✅ [{i+1}] likes:{data['likes']} views:{data['views']} comments:{data['comments']} tags:{len(data['hashtags'])} | {reel_url}")
+                top_reels = scrape_account(driver, account)
+                all_results[account] = top_reels
             except Exception as e:
-                print(f"❌ [{i+1}] Failed: {e}")
-            sleep(2)
-
+                print(f"  ERROR scraping {account}: {e}")
+                all_results[account] = []
     finally:
         driver.quit()
 
-    with open(f"{username}_reels.json", "w", encoding="utf-8") as f:
-        json.dump(reels_data, f, indent=2, ensure_ascii=False)
+    out_file = f"reels_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.json"
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print(f"\n💾 Saved {len(reels_data)} reels to {username}_reels.json")
-    return reels_data
+    print(f"\n{'='*50}")
+    print(f"Saved to {out_file}")
+    total = sum(len(v) for v in all_results.values())
+    print(f"Total: {total} reels across {len(ACCOUNTS)} accounts")
+
 
 if __name__ == "__main__":
-    scrape_reels(TARGET_USERNAME)
+    main()

@@ -9,6 +9,8 @@ jobs:
   scrape-and-download:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -22,11 +24,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Write Drive service account key
-        env:
-          SA_KEY: ${{ secrets.DRIVE_SA_KEY }}
-        run: printf '%s' "$SA_KEY" > /tmp/service_account.json
 
       - name: Write Instagram cookies
         env:
@@ -52,12 +49,25 @@ jobs:
           echo "HTTP_PROXY=socks5h://localhost:1080" >> $GITHUB_ENV
           echo "Proxy up — outbound IP: $(curl -s --socks5-hostname localhost:1080 https://api.ipify.org)"
 
-      # Step 1: List existing reel IDs in Drive (for dedup)
-      - name: List existing reel IDs from Drive
-        run: python scripts/drive_handler.py --mode list-ids --out-existing-ids /tmp/existing_reel_ids.json
-        env:
-          GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+      # Step 1: Build existing reel IDs from data/metadata/ (dedup)
+      - name: Build existing reel IDs from data folder
+        run: |
+          python - <<'EOF'
+          import json, glob, os
+          existing = set()
+          for fpath in glob.glob("data/metadata/*.json"):
+              try:
+                  with open(fpath) as fh:
+                      meta = json.load(fh)
+                  rid = meta.get("identity", {}).get("reel_id")
+                  if rid:
+                      existing.add(rid)
+              except Exception:
+                  pass
+          with open("/tmp/existing_reel_ids.json", "w") as f:
+              json.dump(list(existing), f)
+          print(f"Found {len(existing)} existing reels in data/metadata/")
+          EOF
 
       # Step 2: Scrape reels from Instagram
       - name: Scrape Instagram reels
@@ -69,23 +79,39 @@ jobs:
       - name: Compute metrics
         run: python scripts/metrics.py --in /tmp/scraper_output.json --out /tmp/metrics_output.json
 
-      # Step 4: Download top reels (skip existing)
+      # Step 4: Download top reels to data/reels/
       - name: Download top reels
         run: |
           python scripts/downloader.py \
             --metrics-json /tmp/metrics_output.json \
             --existing-ids-json /tmp/existing_reel_ids.json \
-            --out-dir /tmp/downloads \
+            --out-dir data/reels \
             --out-manifest /tmp/download_manifest.json
         env:
           IG_COOKIES_FILE: /tmp/ig_cookies.txt
+          YTDLP_COOKIES_FILE: /tmp/ig_cookies.txt
 
-      # Step 5: Upload to Google Drive
-      - name: Upload to Google Drive
-        run: python scripts/drive_handler.py --mode upload --manifest /tmp/download_manifest.json
-        env:
-          GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+      # Step 5: Save metadata JSONs to data/metadata/
+      - name: Save metadata to data/metadata/
+        run: |
+          python - <<'EOF'
+          import json, os
+          os.makedirs("data/metadata", exist_ok=True)
+          with open("/tmp/download_manifest.json") as f:
+              manifest = json.load(f)
+          saved = 0
+          for entry in manifest:
+              if entry.get("failed"):
+                  continue
+              meta = entry["meta"]
+              reel_id = meta["identity"]["reel_id"]
+              account = meta["identity"]["account"]
+              fname = f"{account}_{reel_id}.json"
+              with open(f"data/metadata/{fname}", "w") as f:
+                  json.dump(meta, f, indent=2)
+              saved += 1
+          print(f"Saved {saved} metadata files to data/metadata/")
+          EOF
 
       # Step 6: Generate clone strategies via Groq
       - name: Generate clone strategies (Groq)
@@ -97,53 +123,54 @@ jobs:
       - name: Select best reference video
         run: python scripts/selector.py --in /tmp/groq_output.json --out-selection /tmp/selection_result.json
 
-      # Step 8: Copy best reel to top_reference/ and update selection_log
-      - name: Update top_reference in Drive
+      # Step 8: Update data/top_reference/ and data/state/selection_log.json
+      - name: Update top_reference and selection_log
         run: |
           python - <<'EOF'
-          import json, os, sys
-          sys.path.insert(0, "scripts")
-          import drive_handler as dh
-
-          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
-          service = dh.build_service()
+          import json, os, shutil
+          os.makedirs("data/top_reference", exist_ok=True)
+          os.makedirs("data/state", exist_ok=True)
 
           with open("/tmp/selection_result.json") as f:
               result = json.load(f)
 
-          best = result["best_meta"]
+          best  = result["best_meta"]
           entry = result["selection_entry"]
+          reel_id = best["identity"]["reel_id"]
+          account = best["identity"]["account"]
 
-          dh.copy_to_top_reference(service, root_id, best)
-
-          log_name = "selection_log.json"
-          state_folder = dh.get_or_create_folder(service, "state", root_id)
-          existing = dh.file_exists(service, log_name, state_folder)
-          existing_log = []
-          if existing:
-              import tempfile
-              with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
-                  tf_path = tf.name
-              dh.download_file(service, existing, tf_path)
-              with open(tf_path) as f:
-                  existing_log = json.load(f)
-
-          existing_log.append(entry)
-          import tempfile
-          with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
-              json.dump(existing_log, tf, indent=2)
-              tf_path = tf.name
-
-          if existing:
-              dh.update_file(service, existing, tf_path, "application/json")
+          video_fname = best["drive"]["video_filename"]
+          src = f"data/reels/{video_fname}"
+          if os.path.exists(src):
+              shutil.copy2(src, "data/top_reference/current_best.mp4")
+              print(f"Copied {video_fname} -> data/top_reference/current_best.mp4")
           else:
-              dh.upload_file(service, tf_path, log_name, state_folder, "application/json")
+              print(f"Warning: video not found at {src}, skipping copy")
 
-          print(f"Updated selection_log.json with entry: {entry['reel_id']}")
+          with open("data/top_reference/current_best.json", "w") as f:
+              json.dump(best, f, indent=2)
+
+          log_path = "data/state/selection_log.json"
+          existing_log = []
+          if os.path.exists(log_path):
+              with open(log_path) as f:
+                  existing_log = json.load(f)
+          existing_log.append(entry)
+          with open(log_path, "w") as f:
+              json.dump(existing_log, f, indent=2)
+
+          print(f"top_reference updated: {account}/{reel_id}")
           EOF
-        env:
-          GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+
+      # Step 9: Commit and push everything to repo
+      - name: Commit and push data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && echo "No changes to commit" || \
+            git commit -m "chore: daily reel download $(date -u +%Y-%m-%d)"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
 
       - name: Tear down SSH proxy
         if: always()
@@ -151,4 +178,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -rf /tmp/downloads /tmp/service_account.json
+        run: rm -f /tmp/ig_cookies.txt

@@ -9,6 +9,8 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -22,11 +24,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Write Drive service account key
-        env:
-          SA_KEY: ${{ secrets.DRIVE_SA_KEY }}
-        run: printf '%s' "$SA_KEY" > /tmp/service_account.json
 
       - name: Write Instagram cookies
         env:
@@ -52,57 +49,26 @@ jobs:
           echo "HTTP_PROXY=socks5h://localhost:1080" >> $GITHUB_ENV
           echo "Proxy up — outbound IP: $(curl -s --socks5-hostname localhost:1080 https://api.ipify.org)"
 
-      # Step 1: Download all existing JSON sidecars from Drive
-      - name: Download all JSON sidecars from Drive
+      # Step 1: Load existing metadata from data/metadata/
+      - name: Load existing metadata from data folder
         run: |
           python - <<'EOF'
-          import json, os, sys, tempfile
-          sys.path.insert(0, "scripts")
-          import drive_handler as dh
-
-          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
-          service = dh.build_service()
-
-          all_files = []
-          q = "name contains '.json' and trashed=false"
-          page_token = None
-          while True:
-              res = service.files().list(
-                  q=q,
-                  fields="nextPageToken, files(id, name, parents)",
-                  pageToken=page_token, pageSize=200
-              ).execute()
-              all_files.extend(res.get("files", []))
-              page_token = res.get("nextPageToken")
-              if not page_token:
-                  break
-
-          sidecars = [f for f in all_files
-                      if f["name"] not in ("selection_log.json", "last_run_state.json", "current_best.json")
-                      and "_" in f["name"]]
-
-          downloaded = []
-          os.makedirs("/tmp/json_sidecars", exist_ok=True)
-          for sf in sidecars:
-              out_path = f"/tmp/json_sidecars/{sf['name']}"
+          import json, glob
+          metas = []
+          for fpath in glob.glob("data/metadata/*.json"):
               try:
-                  dh.download_file(service, sf["id"], out_path)
-                  with open(out_path) as f:
-                      meta = json.load(f)
-                  meta["_drive_file_id"] = sf["id"]
-                  downloaded.append(meta)
+                  with open(fpath) as fh:
+                      meta = json.load(fh)
+                  meta["_source_file"] = fpath
+                  metas.append(meta)
               except Exception as e:
-                  print(f"Failed to download {sf['name']}: {e}")
-
+                  print(f"Failed to load {fpath}: {e}")
           with open("/tmp/existing_metadata.json", "w") as f:
-              json.dump(downloaded, f, indent=2)
-          print(f"Downloaded {len(downloaded)} JSON sidecars")
+              json.dump(metas, f, indent=2)
+          print(f"Loaded {len(metas)} metadata files from data/metadata/")
           EOF
-        env:
-          GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
 
-      # Step 2: Build reel_id list for refresh scrape
+      # Step 2: Build reel ID list for re-scrape
       - name: Build reel ID list for re-scrape
         run: |
           python - <<'EOF'
@@ -138,8 +104,8 @@ jobs:
       - name: Recompute metrics
         run: python scripts/metrics.py --in /tmp/refreshed_raw.json --out /tmp/refreshed_metrics.json
 
-      # Step 5: Merge refreshed metrics back into existing metadata
-      - name: Merge refreshed metrics into existing metadata
+      # Step 5: Merge refreshed metrics back into data/metadata/ files
+      - name: Merge refreshed metrics into data/metadata/
         run: |
           python - <<'EOF'
           import json
@@ -151,16 +117,17 @@ jobs:
               refreshed = json.load(f)
 
           refreshed_map = {r["identity"]["reel_id"]: r for r in refreshed}
-          updated = []
+          updated = 0
 
           for meta in existing:
-              rid = meta["identity"]["reel_id"]
+              rid      = meta["identity"]["reel_id"]
+              src_file = meta.pop("_source_file", None)
               if rid in refreshed_map:
                   new = refreshed_map[rid]
-                  meta["raw_metrics"]         = new["raw_metrics"]
-                  meta["computed_metrics"]    = new["computed_metrics"]
-                  meta["retention_proxy"]     = new["retention_proxy"]
-                  meta["virality"]            = new["virality"]
+                  meta["raw_metrics"]      = new["raw_metrics"]
+                  meta["computed_metrics"] = new["computed_metrics"]
+                  meta["retention_proxy"]  = new["retention_proxy"]
+                  meta["virality"]         = new["virality"]
                   meta["decision_summary"].update({
                       k: new["decision_summary"][k]
                       for k in [
@@ -173,66 +140,66 @@ jobs:
                       if k in new["decision_summary"]
                   })
                   meta["identity"]["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-              updated.append(meta)
+                  updated += 1
+              if src_file:
+                  with open(src_file, "w") as f:
+                      json.dump(meta, f, indent=2)
 
-          with open("/tmp/updated_metadata.json", "w") as f:
-              json.dump(updated, f, indent=2)
-          print(f"Merged {len(updated)} metadata records")
+          print(f"Updated {updated}/{len(existing)} metadata records")
           EOF
 
-      # Step 6: Push updated JSONs back to Drive
-      - name: Upload updated JSON sidecars to Drive
-        run: |
-          python - <<'EOF'
-          import json, sys, os
-          sys.path.insert(0, "scripts")
-          import drive_handler as dh
-
-          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
-          service = dh.build_service()
-
-          with open("/tmp/updated_metadata.json") as f:
-              updated = json.load(f)
-
-          for meta in updated:
-              file_id = meta.pop("_drive_file_id", None)
-              if not file_id:
-                  print(f"No file_id for {meta['identity']['reel_id']}, skipping")
-                  continue
-              try:
-                  dh.update_json_on_drive(service, file_id, meta)
-                  print(f"  Updated {meta['drive']['json_filename']}")
-              except Exception as e:
-                  print(f"  Failed to update {meta['identity']['reel_id']}: {e}")
-          EOF
-        env:
-          GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-
-      # Step 7: Re-evaluate best reference video
+      # Step 6: Re-evaluate best reference video
       - name: Re-evaluate best reference video
-        run: python scripts/selector.py --in /tmp/updated_metadata.json --out-selection /tmp/refresh_selection.json
+        run: python scripts/selector.py --in /tmp/refreshed_metrics.json --out-selection /tmp/refresh_selection.json
 
-      - name: Update top_reference if best changed
+      # Step 7: Update data/top_reference/ if best changed
+      - name: Update top_reference
         run: |
           python - <<'EOF'
-          import json, os, sys
-          sys.path.insert(0, "scripts")
-          import drive_handler as dh
-
-          root_id = os.environ["GDRIVE_ROOT_FOLDER_ID"]
-          service = dh.build_service()
+          import json, os, shutil
+          os.makedirs("data/top_reference", exist_ok=True)
+          os.makedirs("data/state", exist_ok=True)
 
           with open("/tmp/refresh_selection.json") as f:
               result = json.load(f)
 
-          best = result["best_meta"]
-          dh.copy_to_top_reference(service, root_id, best)
-          print(f"top_reference updated to {best['identity']['reel_id']}")
+          best  = result["best_meta"]
+          entry = result["selection_entry"]
+          reel_id = best["identity"]["reel_id"]
+          account = best["identity"]["account"]
+
+          video_fname = best["drive"]["video_filename"]
+          src = f"data/reels/{video_fname}"
+          if os.path.exists(src):
+              shutil.copy2(src, "data/top_reference/current_best.mp4")
+              print(f"Copied {video_fname} -> data/top_reference/current_best.mp4")
+          else:
+              print(f"Warning: video not found at {src}, skipping copy")
+
+          with open("data/top_reference/current_best.json", "w") as f:
+              json.dump(best, f, indent=2)
+
+          log_path = "data/state/selection_log.json"
+          existing_log = []
+          if os.path.exists(log_path):
+              with open(log_path) as f:
+                  existing_log = json.load(f)
+          existing_log.append(entry)
+          with open(log_path, "w") as f:
+              json.dump(existing_log, f, indent=2)
+
+          print(f"top_reference updated: {account}/{reel_id}")
           EOF
-        env:
-          GDRIVE_KEY_PATH:       /tmp/service_account.json
-          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+
+      # Step 8: Commit and push updated metadata to repo
+      - name: Commit and push updated metadata
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && echo "No changes to commit" || \
+            git commit -m "chore: refresh metrics $(date -u +%Y-%m-%d_%H:%M)"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
 
       - name: Tear down SSH proxy
         if: always()
@@ -240,4 +207,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -rf /tmp/json_sidecars /tmp/service_account.json
+        run: rm -f /tmp/ig_cookies.txt

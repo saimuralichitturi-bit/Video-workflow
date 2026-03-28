@@ -33,6 +33,25 @@ jobs:
           IG_COOKIES: ${{ secrets.IG_COOKIES }}
         run: printf '%s' "$IG_COOKIES" > /tmp/ig_cookies.txt
 
+      - name: Set up SSH SOCKS5 proxy via Oracle VM
+        env:
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_VM_IP: ${{ secrets.ORACLE_VM_IP }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ORACLE_SSH_KEY" > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H "$ORACLE_VM_IP" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/oracle_key -D 1080 -N -f \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=60 \
+            -o ExitOnForwardFailure=yes \
+            "ubuntu@$ORACLE_VM_IP"
+          echo "ALL_PROXY=socks5h://localhost:1080" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=socks5h://localhost:1080" >> $GITHUB_ENV
+          echo "HTTP_PROXY=socks5h://localhost:1080" >> $GITHUB_ENV
+          echo "Proxy up — outbound IP: $(curl -s --socks5-hostname localhost:1080 https://api.ipify.org)"
+
       # Step 1: List existing reel IDs in Drive (for dedup)
       - name: List existing reel IDs from Drive
         run: python scripts/drive_handler.py --mode list-ids --out-existing-ids /tmp/existing_reel_ids.json
@@ -125,6 +144,10 @@ jobs:
         env:
           GDRIVE_KEY_PATH:       /tmp/service_account.json
           GDRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+
+      - name: Tear down SSH proxy
+        if: always()
+        run: pkill -f "ssh.*1080" || true
 
       - name: Cleanup
         if: always()

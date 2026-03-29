@@ -322,21 +322,26 @@ def extract_reel_data(driver, reel_url, account):
     shortcode = reel_url.rstrip("/").split("/")[-1]
     src       = driver.page_source
 
-    def max_match(pattern):
-        return max((int(m) for m in re.findall(pattern, src)), default=0)
+    # Locate the JSON chunk specific to this reel by shortcode
+    pos   = src.find(f'"{shortcode}"')
+    chunk = src[pos:pos + 2000] if pos != -1 else src
 
-    likes    = max_match(r'"like_count"\s*:\s*(\d+)')
-    views    = max_match(r'"video_view_count"\s*:\s*(\d+)')
-    if views == 0:
-        views = max_match(r'"play_count"\s*:\s*(\d+)')
-    if views == 0:
-        views = max_match(r'"view_count"\s*:\s*(\d+)')
-    comments = max_match(r'"comment_count"\s*:\s*(\d+)')
+    def first_match(pattern, text):
+        m = re.search(pattern, text)
+        return int(m.group(1)) if m else 0
 
-    # caption: look for the reel-specific text node
-    cap = re.search(r'"edge_media_to_caption".*?"text"\s*:\s*"(.*?)"', src, re.DOTALL)
+    likes    = first_match(r'"like_count"\s*:\s*(\d+)', chunk)
+    views    = first_match(r'"video_view_count"\s*:\s*(\d+)', chunk)
+    if views == 0:
+        views = first_match(r'"play_count"\s*:\s*(\d+)', chunk)
+    if views == 0:
+        views = first_match(r'"view_count"\s*:\s*(\d+)', chunk)
+    comments = first_match(r'"comment_count"\s*:\s*(\d+)', chunk)
+
+    # caption from the reel-specific chunk first, fallback to full page
+    cap = re.search(r'"caption_text"\s*:\s*"(.*?)"', chunk)
     if not cap:
-        cap = re.search(r'"caption_text"\s*:\s*"(.*?)"', src)
+        cap = re.search(r'"edge_media_to_caption".*?"text"\s*:\s*"(.*?)"', src, re.DOTALL)
     if not cap:
         cap = re.search(r'"accessibility_caption"\s*:\s*"(.*?)"', src)
     caption  = cap.group(1) if cap else ""

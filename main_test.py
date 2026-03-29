@@ -33,7 +33,7 @@ ACCOUNTS = [
 ]
 
 TOP_N       = 5    # top reels to keep per account
-MAX_SCROLLS = 8    # how many times to scroll on the reels page
+MAX_SCROLLS = 1    # 1 scroll gives ~20 reels, enough to pick top 5
 
 # Cookies file — Netscape format exported from Chrome
 COOKIES_FILE = Path(
@@ -162,15 +162,21 @@ def extract_reel_data(driver, reel_url, account):
     page_source = driver.page_source
 
     # Instagram embeds metrics JSON in page source when logged in
-    likes_match    = re.search(r'"like_count"\s*:\s*(\d+)', page_source)
-    views_match    = re.search(r'"play_count"\s*:\s*(\d+)', page_source)
-    comments_match = re.search(r'"comment_count"\s*:\s*(\d+)', page_source)
-    caption_match  = re.search(r'"text"\s*:\s*"(.*?)"', page_source)
+    # Use maximal match to get the largest (most accurate) value
+    def extract_max(pattern, source):
+        matches = re.findall(pattern, source)
+        return max((int(m) for m in matches), default=0)
 
-    likes    = int(likes_match.group(1))    if likes_match    else 0
-    views    = int(views_match.group(1))    if views_match    else 0
-    comments = int(comments_match.group(1)) if comments_match else 0
-    caption  = caption_match.group(1)       if caption_match  else ""
+    likes    = extract_max(r'"like_count"\s*:\s*(\d+)', page_source)
+    views    = extract_max(r'"video_view_count"\s*:\s*(\d+)', page_source)
+    if views == 0:
+        views = extract_max(r'"play_count"\s*:\s*(\d+)', page_source)
+    comments = extract_max(r'"comment_count"\s*:\s*(\d+)', page_source)
+
+    caption_match = re.search(r'"edge_media_to_caption".*?"text"\s*:\s*"(.*?)"', page_source, re.DOTALL)
+    if not caption_match:
+        caption_match = re.search(r'"accessibility_caption"\s*:\s*"(.*?)"', page_source)
+    caption = caption_match.group(1) if caption_match else ""
 
     hashtags = re.findall(r"#\w+", caption)
 

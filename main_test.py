@@ -1,14 +1,21 @@
 """
 main_test.py
-Scrape top 5 reels by likes from public Instagram accounts.
-No login required — works on public accounts.
+Scrape top 5 reels by likes from Instagram accounts.
+Uses cookies file to stay logged in and get real metrics.
 
-Usage:
+Usage (local):
     python main_test.py
+    # cookies loaded from www.instagram.com_cookies.txt automatically
+
+Usage (CI):
+    IG_COOKIES_FILE=/tmp/ig_cookies.txt python main_test.py
 """
 
+import os
 import json
 import re
+import http.cookiejar
+from pathlib import Path
 from time import sleep
 from datetime import datetime
 
@@ -25,8 +32,13 @@ ACCOUNTS = [
     "indianfinance.in",
 ]
 
-TOP_N = 5          # top reels to keep per account
-MAX_SCROLLS = 8    # how far to scroll to collect reel links
+TOP_N       = 5    # top reels to keep per account
+MAX_SCROLLS = 8    # how many times to scroll on the reels page
+
+# Cookies file — Netscape format exported from Chrome
+COOKIES_FILE = Path(
+    os.environ.get("IG_COOKIES_FILE", "www.instagram.com_cookies.txt")
+)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -40,8 +52,6 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,900")
 
-    # Headless + proxy when running in CI (GitHub Actions)
-    import os
     if os.environ.get("CI"):
         options.add_argument("--headless=new")
         options.add_argument("--remote-debugging-port=9222")
@@ -60,21 +70,53 @@ def get_driver():
     return driver
 
 
+def inject_cookies(driver):
+    """Load Netscape cookies file and inject into Chrome session."""
+    if not COOKIES_FILE.exists():
+        print(f"WARNING: cookies file not found at {COOKIES_FILE} — scraping without login")
+        return
+
+    # Navigate to instagram first so we can set cookies for the domain
+    driver.get("https://www.instagram.com/")
+    sleep(2)
+
+    jar = http.cookiejar.MozillaCookieJar()
+    jar.load(str(COOKIES_FILE), ignore_discard=True, ignore_expires=True)
+
+    injected = 0
+    for cookie in jar:
+        if "instagram.com" in cookie.domain:
+            try:
+                driver.add_cookie({
+                    "name":   cookie.name,
+                    "value":  cookie.value,
+                    "domain": cookie.domain,
+                    "path":   cookie.path,
+                    "secure": cookie.secure,
+                })
+                injected += 1
+            except Exception:
+                pass
+
+    driver.refresh()
+    sleep(3)
+    print(f"  Injected {injected} cookies — logged in as Instagram user")
+
+
 def dismiss_login_modal(driver):
     """Close Instagram's 'Log in to see more' popup if it appears."""
     try:
-        close_btn = driver.find_element(
-            By.CSS_SELECTOR,
-            "button[aria-label='Close'], div[role='dialog'] svg[aria-label='Close']"
-        )
-        close_btn.click()
+        from selenium.webdriver.common.keys import Keys
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
         sleep(1)
     except Exception:
         pass
-    # Also dismiss by pressing Escape
     try:
-        from selenium.webdriver.common.keys import Keys
-        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        close_btn = driver.find_element(
+            By.CSS_SELECTOR,
+            "div[role='dialog'] [aria-label='Close']"
+        )
+        close_btn.click()
         sleep(1)
     except Exception:
         pass
@@ -116,13 +158,14 @@ def extract_reel_data(driver, reel_url, account):
     sleep(3)
     dismiss_login_modal(driver)
 
-    shortcode    = reel_url.rstrip("/").split("/")[-1]
-    page_source  = driver.page_source
+    shortcode   = reel_url.rstrip("/").split("/")[-1]
+    page_source = driver.page_source
 
-    likes_match    = re.search(r'"like_count":(\d+)', page_source)
-    views_match    = re.search(r'"play_count":(\d+)', page_source)
-    comments_match = re.search(r'"comment_count":(\d+)', page_source)
-    caption_match  = re.search(r'"caption":\{"text":"(.*?)"', page_source)
+    # Instagram embeds metrics JSON in page source when logged in
+    likes_match    = re.search(r'"like_count"\s*:\s*(\d+)', page_source)
+    views_match    = re.search(r'"play_count"\s*:\s*(\d+)', page_source)
+    comments_match = re.search(r'"comment_count"\s*:\s*(\d+)', page_source)
+    caption_match  = re.search(r'"text"\s*:\s*"(.*?)"', page_source)
 
     likes    = int(likes_match.group(1))    if likes_match    else 0
     views    = int(views_match.group(1))    if views_match    else 0
@@ -151,8 +194,12 @@ def scrape_account(driver, username):
     links = collect_reel_links(driver, username)
     print(f"  Found {len(links)} reel links")
 
+    if not links:
+        print("  No links found — Instagram may be blocking. Check cookies.")
+        return []
+
     reels = []
-    for i, url in enumerate(links[:20]):   # visit up to 20, pick top N after
+    for i, url in enumerate(links[:20]):
         try:
             data = extract_reel_data(driver, url, username)
             reels.append(data)
@@ -174,6 +221,8 @@ def main():
     all_results = {}
 
     try:
+        inject_cookies(driver)
+
         for account in ACCOUNTS:
             try:
                 top_reels = scrape_account(driver, account)

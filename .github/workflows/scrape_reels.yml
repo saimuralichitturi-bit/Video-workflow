@@ -49,11 +49,17 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y google-chrome-stable
 
+      - name: Write Instagram cookies
+        env:
+          IG_COOKIES: ${{ secrets.IG_COOKIES }}
+        run: printf '%s' "$IG_COOKIES" > /tmp/ig_cookies.txt
+
       - name: Scrape reels
         run: python main_test.py
         env:
           CI: "true"
           SOCKS_PROXY: "socks5://localhost:1080"
+          IG_COOKIES_FILE: /tmp/ig_cookies.txt
 
       - name: Commit and push results
         run: |

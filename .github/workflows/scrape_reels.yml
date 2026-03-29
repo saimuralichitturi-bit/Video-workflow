@@ -9,6 +9,8 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write   # needed to commit best_reels_log.json
 
     steps:
       - name: Checkout repo
@@ -21,7 +23,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install selenium webdriver-manager requests
+        run: pip install selenium webdriver-manager requests groq
 
       - name: Set up SSH SOCKS5 proxy via Oracle VM
         env:
@@ -52,7 +54,7 @@ jobs:
           IG_COOKIES: ${{ secrets.IG_COOKIES }}
         run: printf '%s' "$IG_COOKIES" > /tmp/ig_cookies.txt
 
-      - name: Scrape reels and upload to R2
+      - name: Scrape, upload to R2, pick best with Groq
         run: python main_test.py
         env:
           CI: "true"
@@ -60,6 +62,16 @@ jobs:
           IG_COOKIES_FILE: /tmp/ig_cookies.txt
           R2_WORKER_URL: ${{ secrets.R2_WORKER_URL }}
           R2_API_KEY: ${{ secrets.R2_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_KEY }}
+
+      - name: Commit best_reels_log.json to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add best_reels_log.json
+          git diff --cached --quiet && echo "No changes" || \
+            git commit -m "chore: best reel $(date -u +%Y-%m-%d)"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
 
       - name: Tear down SSH proxy
         if: always()

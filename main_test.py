@@ -37,11 +37,26 @@ def get_driver():
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1280,900")
+
+    # Headless + proxy when running in CI (GitHub Actions)
+    import os
+    if os.environ.get("CI"):
+        options.add_argument("--headless=new")
+        options.add_argument("--remote-debugging-port=9222")
+        proxy = os.environ.get("SOCKS_PROXY", "socks5://localhost:1080")
+        options.add_argument(f"--proxy-server={proxy}")
+        options.add_argument(
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()), options=options
     )
-    driver.set_window_size(1280, 900)
     return driver
 
 

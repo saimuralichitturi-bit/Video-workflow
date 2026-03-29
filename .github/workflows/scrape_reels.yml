@@ -1,0 +1,69 @@
+name: Scrape Top Reels
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # 7:30 AM IST = 02:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install selenium webdriver-manager
+
+      - name: Set up SSH SOCKS5 proxy via Oracle VM
+        env:
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_VM_IP: ${{ secrets.ORACLE_VM_IP }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ORACLE_SSH_KEY" > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H "$ORACLE_VM_IP" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/oracle_key -D 1080 -N -f \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=60 \
+            -o ExitOnForwardFailure=yes \
+            "ubuntu@$ORACLE_VM_IP"
+          echo "Proxy up — outbound IP: $(curl -s --socks5-hostname localhost:1080 https://api.ipify.org)"
+
+      - name: Install Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Scrape reels
+        run: python main_test.py
+        env:
+          CI: "true"
+          SOCKS_PROXY: "socks5://localhost:1080"
+
+      - name: Commit and push results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reels_*.json
+          git diff --cached --quiet && echo "No new data" || \
+            git commit -m "chore: scraped reels $(date -u +%Y-%m-%d)"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+
+      - name: Tear down SSH proxy
+        if: always()
+        run: pkill -f "ssh.*1080" || true

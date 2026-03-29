@@ -1,17 +1,19 @@
-# Google credentials — never commit these
+# credentials — never commit
+.env
 client_secret*.json
 service_account*.json
-*-credentials.json
-*.keyfile.json
 myproject*.json
+session.json
 
-# Runtime artifacts
-/tmp/
+# instagram cookies — never commit
+*_cookies.txt
+
+# scrape output files (committed by workflow only)
+reels_*.json
+
+# python
 __pycache__/
 *.pyc
 *.pyo
-.env
-session.txt
-instagram_session.json
-*_cookies.txt
-cookies.txt
+.venv/
+venv/

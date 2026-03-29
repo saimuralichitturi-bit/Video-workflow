@@ -9,8 +9,6 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repo
@@ -23,7 +21,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install selenium webdriver-manager
+        run: pip install selenium webdriver-manager requests
 
       - name: Set up SSH SOCKS5 proxy via Oracle VM
         env:
@@ -54,21 +52,14 @@ jobs:
           IG_COOKIES: ${{ secrets.IG_COOKIES }}
         run: printf '%s' "$IG_COOKIES" > /tmp/ig_cookies.txt
 
-      - name: Scrape reels
+      - name: Scrape reels and upload to R2
         run: python main_test.py
         env:
           CI: "true"
           SOCKS_PROXY: "socks5://localhost:1080"
           IG_COOKIES_FILE: /tmp/ig_cookies.txt
-
-      - name: Commit and push results
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add reels_*.json
-          git diff --cached --quiet && echo "No new data" || \
-            git commit -m "chore: scraped reels $(date -u +%Y-%m-%d)"
-          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+          R2_WORKER_URL: ${{ secrets.R2_WORKER_URL }}
+          R2_API_KEY: ${{ secrets.R2_API_KEY }}
 
       - name: Tear down SSH proxy
         if: always()

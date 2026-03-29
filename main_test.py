@@ -12,6 +12,7 @@ Set your Instagram sessionid in IG_SESSION_ID env var or hardcode below.
 import os
 import json
 import re
+from pathlib import Path
 from time import sleep
 from datetime import datetime
 
@@ -22,7 +23,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SESSION_ID = os.environ.get("IG_SESSION_ID", "")   # or paste your sessionid here
+SESSION_FILE = Path(__file__).parent / "session.json"
 
 ACCOUNTS = [
     "marketsbyzerodha",
@@ -32,6 +33,40 @@ ACCOUNTS = [
 
 TOP_N = 5          # top reels to keep per account
 MAX_SCROLLS = 8    # how far to scroll on reels page to collect links
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def load_session_id() -> str:
+    """Read sessionid from session.json cookies dict."""
+    if not SESSION_FILE.exists():
+        raise FileNotFoundError(
+            f"session.json not found at {SESSION_FILE}\n"
+            "Run this once to create it:\n"
+            "  python -c \"from instagrapi import Client; cl = Client(); "
+            "cl.login('YOUR_USERNAME','YOUR_PASSWORD'); cl.dump_settings('session.json')\""
+        )
+
+    with open(SESSION_FILE) as f:
+        data = json.load(f)
+
+    cookies = data.get("cookies", {})
+    session_id = cookies.get("sessionid", "")
+
+    if not session_id:
+        raise ValueError(
+            "session.json has no sessionid cookie — session may be empty.\n"
+            "Re-login with instagrapi to populate it:\n"
+            "  python -c \"from instagrapi import Client; cl = Client(); "
+            "cl.login('YOUR_USERNAME','YOUR_PASSWORD'); cl.dump_settings('session.json')\""
+        )
+
+    return session_id
+
+
+def load_all_cookies() -> dict:
+    """Return all cookies from session.json."""
+    with open(SESSION_FILE) as f:
+        return json.load(f).get("cookies", {})
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -50,14 +85,14 @@ def get_driver():
     return driver
 
 
-def inject_session(driver, username):
+def inject_session(driver, username, cookies: dict):
     driver.get(f"https://www.instagram.com/{username}/")
     sleep(2)
-    driver.add_cookie({
-        "name": "sessionid",
-        "value": SESSION_ID,
-        "domain": ".instagram.com",
-    })
+    for name, value in cookies.items():
+        try:
+            driver.add_cookie({"name": name, "value": str(value), "domain": ".instagram.com"})
+        except Exception:
+            pass
     driver.refresh()
     sleep(3)
 
@@ -122,11 +157,11 @@ def extract_reel_data(driver, reel_url, account):
     }
 
 
-def scrape_account(driver, username):
+def scrape_account(driver, username, cookies: dict):
     print(f"\n{'='*50}")
     print(f"Scraping @{username}...")
 
-    inject_session(driver, username)
+    inject_session(driver, username, cookies)
     links = collect_reel_links(driver, username)
     print(f"  Found {len(links)} reel links")
 
@@ -149,10 +184,8 @@ def scrape_account(driver, username):
 
 
 def main():
-    if not SESSION_ID:
-        print("ERROR: IG_SESSION_ID not set.")
-        print("Get it from Chrome → F12 → Application → Cookies → instagram.com → sessionid")
-        return
+    cookies = load_all_cookies()
+    print(f"Loaded session from {SESSION_FILE} ({len(cookies)} cookies)")
 
     driver = get_driver()
     all_results = {}
@@ -160,7 +193,7 @@ def main():
     try:
         for account in ACCOUNTS:
             try:
-                top_reels = scrape_account(driver, account)
+                top_reels = scrape_account(driver, account, cookies)
                 all_results[account] = top_reels
             except Exception as e:
                 print(f"  ERROR scraping {account}: {e}")

@@ -51,7 +51,7 @@ flowchart TD
     B --> I[🎤 STAGE 6A: VOICE CLONE\nYour Own Voice]
     I --> I1[facebook/demucs\nDenoise your recording\nClean voice isolation]
     I1 --> I2[Trim to cleanest\n30 second segment\nfor speaker embedding]
-    I2 --> I3[🤗 fishaudio/fish-speech-1.5\nVoice Clone\nTimbre · Accent · Rhythm\nVRAM ~4GB]
+    I2 --> I3[🤗 SWivid/F5-TTS\nVoice Clone\nTimbre · Accent · Rhythm\nVRAM ~4GB]
     I3 --> I4{Quality Check}
     I4 -->|Good| I5[(voiceover_cloned.wav\nyour voice speaking script)]
     I4 -->|Artifacts| I6[🤗 coqui/XTTS-v2\nFallback Clone\n17 languages · VRAM ~3GB]
@@ -107,7 +107,7 @@ flowchart TD
         S1[Cell 05\nDemucs ~3GB]
         S2[Cell 07\nFLUX ~12GB]
         S3[Cell 08\nSkyReels ~10GB]
-        S4[Cell 09\nfish-speech ~4GB]
+        S4[Cell 09\nF5-TTS ~4GB]
         S5[Cell 10\nOpenVoiceV2 ~3GB]
         S6[Cell 11\nMusicGen ~4GB]
         S1 --> S2 --> S3 --> S4 --> S5 --> S6

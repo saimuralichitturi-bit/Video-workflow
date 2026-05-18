@@ -305,5 +305,18 @@
     "hashtags": [],
     "groq_reason": "This reel is the best to clone because it has the same empty metrics as the other reels, making it a blank slate for recreation.",
     "scraped_at": "2026-05-17T05:43:00.310811+00:00"
+  },
+  {
+    "date": "2026-05-18",
+    "shortcode": "DYcVGZCt1DA",
+    "account": "marketsbyzerodha",
+    "url": "https://www.instagram.com/marketsbyzerodha/reel/DYcVGZCt1DA/",
+    "likes": 0,
+    "views": 0,
+    "comments": 0,
+    "caption": "",
+    "hashtags": [],
+    "groq_reason": "fallback: highest likes",
+    "scraped_at": "2026-05-18T06:05:52.716782+00:00"
   }
 ]
